@@ -1,23 +1,26 @@
 """Trace and Eval API endpoints."""
 
-from fastapi import APIRouter, HTTPException
-from app.trace.trace_eval import (
-    get_trace,
+from fastapi import APIRouter, Depends, HTTPException
+from app.trace.trace import get_trace
+from app.eval.eval import (
     run_eval,
     run_all_evals,
     save_eval_run,
     EVAL_CASES,
 )
+from app.core.profile import require_owned_session, require_profile_id
+from app.session.session import get_session
 
 router = APIRouter(prefix="/api", tags=["trace-eval"])
 
 
 @router.get("/traces/{trace_id}")
-async def get_trace_endpoint(trace_id: str):
+async def get_trace_endpoint(trace_id: str, profile_id: str = Depends(require_profile_id)):
     """Get a trace by ID with all events."""
     trace = get_trace(trace_id)
     if trace is None:
         raise HTTPException(status_code=404, detail="Trace not found")
+    require_owned_session(get_session(trace["session_id"]), profile_id)
     return trace
 
 

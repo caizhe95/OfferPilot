@@ -24,7 +24,7 @@ class TestSessionLifecycle:
         init_db()
         session = create_session()
         assert "id" in session
-        assert session["status"] == "created"
+        assert session["status"] == "ready"
         assert "created_at" in session
 
     def test_get_session(self):
@@ -33,7 +33,7 @@ class TestSessionLifecycle:
         fetched = get_session(session["id"])
         assert fetched is not None
         assert fetched["id"] == session["id"]
-        assert fetched["status"] == "created"
+        assert fetched["status"] == "ready"
 
     def test_get_nonexistent_session(self):
         init_db()
@@ -43,7 +43,7 @@ class TestSessionLifecycle:
         init_db()
         session = create_session()
 
-        # created -> running
+        # ready -> running
         s = transition_session(session["id"], "running")
         assert s is not None
         assert s["status"] == "running"
@@ -53,52 +53,47 @@ class TestSessionLifecycle:
         assert s is not None
         assert s["status"] == "waiting_approval"
 
-        # waiting_approval -> running
-        s = transition_session(session["id"], "running")
+        # waiting_approval -> ready
+        s = transition_session(session["id"], "ready")
         assert s is not None
-        assert s["status"] == "running"
-
-        # running -> completed
-        s = transition_session(session["id"], "completed")
-        assert s is not None
-        assert s["status"] == "completed"
+        assert s["status"] == "ready"
 
     def test_invalid_transition_raises(self):
         init_db()
         session = create_session()
 
-        # created -> completed (invalid)
+        # ready -> completed (invalid)
         with pytest.raises(ValueError, match="Invalid transition"):
             transition_session(session["id"], "completed")
 
-        # created -> waiting_approval (invalid)
+        # ready -> waiting_approval (invalid)
         with pytest.raises(ValueError, match="Invalid transition"):
             transition_session(session["id"], "waiting_approval")
 
-    def test_terminal_status_no_transition(self):
+    def test_failed_status_no_transition(self):
         init_db()
         session = create_session()
         transition_session(session["id"], "running")
-        transition_session(session["id"], "completed")
+        transition_session(session["id"], "failed")
 
-        # completed -> anything should fail
+        # failed -> anything should fail
         with pytest.raises(ValueError):
             transition_session(session["id"], "running")
 
-    def test_cancelled_from_created(self):
+    def test_cancelled_from_ready(self):
         init_db()
         session = create_session()
         s = transition_session(session["id"], "cancelled")
         assert s is not None
         assert s["status"] == "cancelled"
 
-    def test_pause_resume(self):
+    def test_ready_after_turn(self):
         init_db()
         session = create_session()
         transition_session(session["id"], "running")
-        s = transition_session(session["id"], "paused")
+        s = transition_session(session["id"], "ready")
         assert s is not None
-        assert s["status"] == "paused"
+        assert s["status"] == "ready"
         s = transition_session(session["id"], "running")
         assert s is not None
         assert s["status"] == "running"
@@ -161,11 +156,11 @@ class TestProgressEvents:
         session = create_session()
         add_progress_event(session["id"], "input_received")
         add_progress_event(session["id"], "qa_extracted")
-        add_progress_event(session["id"], "skill_selected")
+        add_progress_event(session["id"], "knowledge_retrieved")
 
         events = get_progress_events(session["id"])
         assert len(events) == 3
-        assert [e["stage"] for e in events] == ["input_received", "qa_extracted", "skill_selected"]
+        assert [e["stage"] for e in events] == ["input_received", "qa_extracted", "knowledge_retrieved"]
 
 
 class TestCheckpoints:
@@ -181,16 +176,37 @@ class TestCheckpoints:
             messages=[{"role": "user", "content": "test"}],
             knowledge=["context-window"],
             memory_keys=["weakness"],
+            trace_id="trace-123",
+            run_kind="diagnose",
         )
         assert cp is not None
         assert cp["state"] == "running"
         assert cp["progress"] == ["input_received", "qa_extracted"]
+        assert cp["trace_id"] == "trace-123"
+        assert cp["run_kind"] == "diagnose"
 
         retrieved = get_checkpoint(cp["id"])
         assert retrieved is not None
         assert retrieved["state"] == "running"
         assert retrieved["progress"] == ["input_received", "qa_extracted"]
         assert retrieved["knowledge"] == ["context-window"]
+        assert retrieved["trace_id"] == "trace-123"
+        assert retrieved["run_kind"] == "diagnose"
+
+    def test_checkpoint_trace_attribution(self):
+        init_db()
+        session = create_session()
+        cp = save_checkpoint(
+            session["id"],
+            state="completed",
+            trace_id="trace-abc",
+            run_kind="chat",
+        )
+        assert cp["trace_id"] == "trace-abc"
+        assert cp["run_kind"] == "chat"
+        latest = get_latest_checkpoint(session["id"])
+        assert latest["trace_id"] == "trace-abc"
+        assert latest["run_kind"] == "chat"
 
     def test_get_latest_checkpoint(self):
         init_db()

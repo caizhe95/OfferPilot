@@ -1,167 +1,172 @@
 # OfferPilot Lite
 
-基于 **pi-mono** + **FastAPI** + **Next.js** 的 AI Agent / LLM 工程面试诊断系统。
+基于 **FastAPI + 原生 Function Calling Coach Agent + Next.js** 的受限自主技术面试教练。
 
-业务聚焦：单 Agent 文本诊断 + 音频诊断，复杂度放在 Harness Engineering，不做多 Agent 和模拟面试。
+业务聚焦：技术面试练习、复盘、追问和题库推荐。正式评分仅由受限的 `run_diagnosis` 复合工具执行；项目不是开放域 Chatbot，也不处理简历、JD 或泛求职问题。
 
 ## 架构
 
-```
+```text
 Web UI (Next.js)
   └─→ FastAPI Backend (Python)
-        ├─→ SQLite / FTS5
-        ├─→ Session / Permission / Progress / Checkpoint
-        ├─→ Memory / Trace / Eval
-        └─→ pi-mono Agent Service (TypeScript)
-              ├─→ Rules
-              ├─→ Skills
-              ├─→ Tools
-              ├─→ Hooks
-              ├─→ Budget
-              └─→ Output Checker
+        ├─→ Python Agent Loop
+        │     ├─→ Harness / Tool Registry / Budget / Output Checker
+        │     ├─→ Permission / Session / Checkpoint / Progress
+        │     └─→ Trace / Eval / Memory candidates
+        ├─→ SQLite / FTS5 / Embedding
+        ├─→ OpenAI-compatible chat + Embedding
+        └─→ MiMo ASR
 ```
 
 ## 快速启动
 
-### Mock 模式（无需 API Key）
+```powershell
+copy .env.example .env
+```
+
+编辑 `.env`，分别设置文本模型、Embedding 与 MiMo：
+
+```env
+OFFERPILOT_OPENAI_API_KEY=
+OFFERPILOT_OPENAI_BASE_URL=https://your-text-gateway.example/v1
+OFFERPILOT_OPENAI_MODEL=
+OFFERPILOT_EMBEDDING_API_KEY=
+OFFERPILOT_EMBEDDING_BASE_URL=https://your-embedding-gateway.example/v1
+OFFERPILOT_EMBEDDING_MODEL=
+MIMO_API_KEY=
+```
+
+启动后端：
 
 ```powershell
-# 1. 启动 FastAPI 后端
-cd apps/api
+cd apps\api
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-# 2. 启动 Agent 服务（新终端）
-cd apps/agent-ts
-npm install
-npx tsx src/server.ts
+启动前端：
 
-# 3. 启动 Web 前端（新终端）
-cd apps/web
-npm install
-npm run dev
+```powershell
+cd apps\web
+npm.cmd install
+npm.cmd run dev
 ```
 
 打开 http://localhost:3000
 
-### 真实 OpenAI 兼容模式
-
-```powershell
-# 复制并编辑 .env
-copy .env.example .env
-# 编辑 .env 设置 OPENAI_API_KEY 和 MOCK_AGENT=false
-```
-
-### Docker Compose 一键启动
+Docker Compose：
 
 ```powershell
 docker compose up --build
 ```
 
-## 三服务关系
-
-| 服务 | 端口 | 技术栈 | 说明 |
-|------|------|--------|------|
-| **api** | 8000 | Python FastAPI | 业务编排、数据库、工具、权限 |
-| **agent** | 3001 | TypeScript pi-mono | Agent 推理、工具调用 |
-| **web** | 3000 | Next.js | 前端 UI、SSE 流式交互 |
-
 ## 当前业务边界
 
-- ✅ 单 Agent 文本诊断
-- ✅ 音频上传 + ASR + 诊断
-- ✅ 后端 Harness 闭环：Permission / Session / Audit / Memory candidates / Trace / Evals
-- ❌ 不做多 Agent
-- ❌ 不做模拟面试
-- ❌ 不做 TTS（文字转语音）
-- ❌ 不做 JD/简历分析
-- ❌ 不做向量库
+- 支持：单题对标诊断，用户提供“面试题 + 自己的回答”。
+- 支持：音频上传、ASR 权限确认、transcript 回填回答框。
+- 支持：FTS5 + Embedding 双通道题库检索、RRF 合并。
+- 支持：Permission / Session / Audit / Memory candidates / Trace / Eval。
+- 不支持：开放域知识问答。
+- 不支持：多 Agent、模拟面试、TTS、JD/简历分析。
+
+## Coach Agent
+
+后端主链路运行在 `apps/api/app/agent/`：
+
+- `coach_loop.py`：原生 Function Calling Coach Loop，最多 4 轮、8 次工具调用和 45 秒活跃执行预算。
+- `registry.py`：按 Profile 限制的工具注册表，使用严格 Pydantic 参数 schema。
+- `coaching/state.py`：跨审批、跨进程恢复的 Agent 轨迹与审批状态。
+
+诊断链路：
+
+```text
+用户消息 + 最近 12 条会话历史
+-> native tool_calls
+-> 受限 Coach 工具
+-> run_diagnosis（FTS5 + Embedding + RRF + 一次结构化评分 + output_check）
+-> 报告持久化 / 记忆审批 / Trace
+-> final_response 或 waiting_approval -> resume
+```
+
+## 知识库与检索
+
+本项目使用题库型 RAG：一个 Markdown 文件代表一道面试题，含 Q / 新手答 / 高手答 / 考察点 / 常见缺失 / 追问。
+
+```text
+面试题
+  ├─→ FTS5 关键词检索（top 10）
+  ├─→ Embedding 语义检索（top 10）
+  └─→ RRF (k=60) 合并去重 → top 5
+```
+
+- Embedding 独立配置，不复用文本模型配置。
+- 正式环境要求 Embedding 可用；未配置、调用失败或当前模型无向量时诊断返回可重试错误。
+- `/api/tools/search-knowledge` 是 internal/debug tool API，不作为用户功能展示。
+- 显式重建：`POST /api/admin/knowledge/reindex`，必须携带 `X-OfferPilot-Admin-Key`。
+- CLI 重建：`python -m app.knowledge.reindex`。
+
+Embedding 配置：
+
+```env
+OFFERPILOT_EMBEDDING_PROVIDER=openai-compatible
+OFFERPILOT_EMBEDDING_API_KEY=
+OFFERPILOT_EMBEDDING_BASE_URL=
+OFFERPILOT_EMBEDDING_MODEL=BAAI/bge-m3
+OFFERPILOT_EMBEDDING_TIMEOUT_SECONDS=30
+OFFERPILOT_REQUIRE_EMBEDDING=true
+OFFERPILOT_ADMIN_KEY=change-me-before-enabling-reindex
+```
+
+## API
+
+- 唯一正式 SSE 入口：`POST /api/coach`
+- Coach 通过原生 Function Calling 选择受限工具；正式评分只能经由确定性 `run_diagnosis` 复合工具。
+- 权限路径：`/api/permission/*`
+- 知识检索：`GET /api/tools/search-knowledge` 或 `POST /api/tools/search-knowledge`
+- Coach 恢复：`POST /api/coach/resume`
+- 报告导出：`GET /api/coach/reports/export`
+- 会话归属接口要求 `X-OfferPilot-Profile-Id`。Web 会自动生成并保存在当前浏览器；这是匿名本地身份，不是账户登录。
 
 ## 测试
 
 ```powershell
-# API 测试
-cd apps/api
-python -m pytest tests
-
-# Agent 测试
-cd apps/agent-ts
-npm test
-
-# Web 构建检查
-cd apps/web
-npm run build
-
-# 全量检查
-docker compose up --build
-```
-
-## 后端 Harness 能力
-
-- medium/high 风险工具统一返回 `permission_required` 事件。
-- `save_memory`、`export_report`、`transcribe_audio` 走 PermissionGate、audit_log 和 resume 流程。
-- Session 会在权限请求时进入 `waiting_approval`，approve/resume 后回到 `running`，deny 后进入 `failed`。
-- `/api/diagnose` 只生成 memory candidates，不直接绕过权限写入 memory。
-- FastAPI 编排层执行 pre-input、pre-tool、post-tool、post-output、Budget 和 Output Checker。
-- Eval 已包含诊断质量和 Harness 工程闭环回归用例。
-
-## 前端端到端能力
-
-- 会话页刷新后会恢复 session 状态、历史消息、progress、latest checkpoint 和 trace id。
-- SSE 诊断过程中展示 process step、tool call、tool result、permission card 和最终 Markdown 报告。
-- 权限卡片点击“允许并继续”会先 approve，再调用 resume，确保 `save_memory`、`transcribe_audio`、`export_report` 真正执行。
-- 权限卡片点击“拒绝”会调用 deny，刷新 session 状态，并对 ASR 场景提示手动 transcript fallback。
-- 音频上传支持 wav/mp3，ASR 前请求权限；approve + resume 后 transcript 自动填入诊断输入框。
-- ASR 失败或用户拒绝后，可手动粘贴 transcript 并调用 `/api/audio/transcript/manual` 保存。
-- Trace id 可在会话页打开轻量 Trace Events 面板，用于查看 Harness 执行链路。
-
-## API 兼容路径
-
-- 权限主路径：`/api/permission/*`
-- 权限兼容路径：`/api/permissions/*`
-- 知识检索：`GET /api/tools/search-knowledge` 或 `POST /api/tools/search-knowledge`
-- 报告导出兼容路径：`GET /api/reports/export`
-
-## PowerShell 手动验收
-
-```powershell
-cd D:\项目\OfferPilot\lite-offerpilot\apps\api
+cd apps\api
 python -m pytest tests
 ```
 
 ```powershell
-cd D:\项目\OfferPilot\lite-offerpilot\apps\agent-ts
-npm.cmd run build
-npm.cmd test
-```
-
-```powershell
-cd D:\项目\OfferPilot\lite-offerpilot\apps\web
+cd apps\web
 npm.cmd run build
 ```
-
-Docker Compose 验证需要本机安装 Docker Desktop：
 
 ```powershell
 cd D:\项目\OfferPilot\lite-offerpilot
 docker compose config
-docker compose build
 ```
 
 ## 目录结构
 
-```
+```text
 lite-offerpilot/
 ├── apps/
-│   ├── api/             FastAPI 后端
-│   ├── agent-ts/        pi-mono Agent 服务
+│   ├── api/             FastAPI 后端 + Python Agent Loop
 │   └── web/             Next.js 前端
 ├── harness/
-│   ├── rules/           Agent 行为规则
-│   └── skills/          诊断 Skills
-├── knowledge/
-│   └── selected/        精选知识库
+│   ├── rules/           行为规则
+├── knowledge/           题库型 RAG Markdown
 ├── docs/                架构与设计文档
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
 ```
+
+### 后端模块
+
+`apps/api/app/` 按业务领域组织，避免把路由、模型调用和存储逻辑混在一起：
+
+- `agent/`：固定诊断 Loop、工具注册与运行时类型。
+- `diagnosis/`：单次结构化诊断、Context、报告持久化与 HTTP 入口。
+- `knowledge/`：题库解析、FTS5、Embedding、RRF 与 reload。
+- `audio/`：MiMo ASR 上传和转写。
+- `session/`、`permission/`、`trace/`：会话、审批审计和可观测性。
+- `harness/`、`eval/`、`reports/`：输出约束、回归评估和报告导出。
+- `core/`、`llm/`、`chat/`：共享配置/数据库/错误、模型适配和 SSE 入口。

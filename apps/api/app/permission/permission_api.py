@@ -1,6 +1,6 @@
 """Permission API endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from app.permission.permission import (
     permission_gate,
@@ -9,9 +9,14 @@ from app.permission.permission import (
     RiskLevel,
 )
 from app.session.session import fail_after_denial, resume_after_approval
+from app.core.api_helpers import run_guarded_tool
+from app.diagnosis.diagnosis import save_memory
+from app.core.profile import require_owned_session, require_profile_id
+from app.session.session import get_session
+from app.coaching.state import get_approval, resolve_approval
 
 router = APIRouter(prefix="/api/permission", tags=["permission"])
-alias_router = APIRouter(prefix="/api/permissions", tags=["permission-alias"])
+tool_router = APIRouter(prefix="/api/tools", tags=["permission"])
 
 
 class CheckPermissionRequest(BaseModel):
@@ -25,9 +30,33 @@ class ApprovalRequest(BaseModel):
     session_id: str
 
 
+class SaveMemoryRequest(BaseModel):
+    session_id: str
+    key: str
+    value: str
+    category: str = "general"
+    trace_id: str | None = None
+
+
+@tool_router.post("/save-memory")
+async def save_memory_endpoint(req: SaveMemoryRequest, profile_id: str = Depends(require_profile_id)):
+    """Request an audited, user-approved memory write."""
+    require_owned_session(get_session(req.session_id), profile_id)
+    params = req.model_dump() | {"profile_id": profile_id}
+    return run_guarded_tool(
+        session_id=req.session_id,
+        tool_name="save_memory",
+        params=params,
+        trace_id=req.trace_id,
+        execute=lambda: save_memory(req.session_id, req.key, req.value, req.category, profile_id=profile_id),
+        trace_payload=lambda _result: {"tool": "save_memory", "key": req.key},
+    )
+
+
 @router.post("/check")
-async def check_permission(request: CheckPermissionRequest):
+async def check_permission(request: CheckPermissionRequest, profile_id: str = Depends(require_profile_id)):
     """Check if a tool call needs approval."""
+    require_owned_session(get_session(request.session_id), profile_id)
     result = permission_gate.check(
         request.session_id,
         request.tool_name,
@@ -46,11 +75,24 @@ async def check_permission(request: CheckPermissionRequest):
 
 
 @router.post("/approve")
-async def approve_tool(request: ApprovalRequest):
+async def approve_tool(request: ApprovalRequest, profile_id: str = Depends(require_profile_id)):
     """Approve a pending tool request."""
+    require_owned_session(get_session(request.session_id), profile_id)
+    pending = permission_gate.get_pending(request.request_id)
+    if pending is None:
+        pending = get_approval(request.request_id, request.session_id, profile_id)
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Pending request not found")
+        resolved = resolve_approval(request.request_id, request.session_id, profile_id, "approved")
+        if resolved is None:
+            raise HTTPException(status_code=409, detail="Approval already resolved")
+        write_audit_log(request.session_id, pending["tool_name"], pending["risk_level"], "approve", pending.get("params"))
+        return {"status": "approved", "tool_name": pending["tool_name"]}
+    if pending.get("session_id") != request.session_id:
+        raise HTTPException(status_code=404, detail="Pending request not found")
     pending = permission_gate.approve(request.request_id)
     if pending is None:
-        raise HTTPException(status_code=404, detail="Pending request not found")
+        raise HTTPException(status_code=409, detail="Approval already resolved")
 
     write_audit_log(
         session_id=request.session_id,
@@ -64,11 +106,24 @@ async def approve_tool(request: ApprovalRequest):
 
 
 @router.post("/deny")
-async def deny_tool(request: ApprovalRequest):
+async def deny_tool(request: ApprovalRequest, profile_id: str = Depends(require_profile_id)):
     """Deny a pending tool request."""
+    require_owned_session(get_session(request.session_id), profile_id)
+    pending = permission_gate.get_pending(request.request_id)
+    if pending is None:
+        pending = get_approval(request.request_id, request.session_id, profile_id)
+        if pending is None:
+            raise HTTPException(status_code=404, detail="Pending request not found")
+        resolved = resolve_approval(request.request_id, request.session_id, profile_id, "denied")
+        if resolved is None:
+            raise HTTPException(status_code=409, detail="Approval already resolved")
+        write_audit_log(request.session_id, pending["tool_name"], pending["risk_level"], "deny", pending.get("params"))
+        return {"status": "denied", "tool_name": pending["tool_name"]}
+    if pending.get("session_id") != request.session_id:
+        raise HTTPException(status_code=404, detail="Pending request not found")
     pending = permission_gate.deny(request.request_id)
     if pending is None:
-        raise HTTPException(status_code=404, detail="Pending request not found")
+        raise HTTPException(status_code=409, detail="Approval already resolved")
 
     write_audit_log(
         session_id=request.session_id,
@@ -92,15 +147,21 @@ class ResumeRequest(BaseModel):
 
 
 @router.post("/resume")
-async def resume_tool(request: ResumeRequest):
+async def resume_tool(request: ResumeRequest, profile_id: str = Depends(require_profile_id)):
     """Resume execution of an approved tool call.
 
     Checks that the request has been approved, then executes the tool.
     Returns the tool result.
     """
-    pending = permission_gate.consume_approved_params(request.request_id)
+    require_owned_session(get_session(request.session_id), profile_id)
+    pending = permission_gate.get_approved_params(request.request_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending request not found or not yet approved")
+    if pending.get("session_id") != request.session_id:
+        raise HTTPException(status_code=404, detail="Pending request not found")
+    pending = permission_gate.consume_approved_params(request.request_id)
+    if pending is None:
+        raise HTTPException(status_code=409, detail="Approved request already consumed")
 
     # Execute the tool
     tool_name = pending["tool_name"]
@@ -114,10 +175,13 @@ async def resume_tool(request: ResumeRequest):
                 params.get("key", "unknown"),
                 params.get("value", ""),
                 params.get("category", "general"),
+                profile_id=profile_id,
             )
         elif tool_name == "export_report":
             from app.diagnosis.diagnosis import get_diagnosis_report
             result = get_diagnosis_report(params.get("report_id", ""))
+            if result is None or result.get("session_id") != request.session_id:
+                raise HTTPException(status_code=404, detail="Report not found")
         elif tool_name == "transcribe_audio":
             from app.audio.audio import transcribe_audio, save_transcript_to_session
             filepath = params.get("filepath")
@@ -167,8 +231,10 @@ async def resume_tool(request: ResumeRequest):
 async def get_session_audit_logs(
     session_id: str,
     limit: int = 50,
+    profile_id: str = Depends(require_profile_id),
 ):
     """Get audit logs for a session."""
+    require_owned_session(get_session(session_id), profile_id)
     return {"audit_logs": get_audit_logs(session_id, limit=limit)}
 
 
@@ -183,22 +249,3 @@ async def get_tool_risk_levels():
         ]
     }
 
-
-@alias_router.post("/check")
-async def check_permission_alias(request: CheckPermissionRequest):
-    return await check_permission(request)
-
-
-@alias_router.post("/approve")
-async def approve_tool_alias(request: ApprovalRequest):
-    return await approve_tool(request)
-
-
-@alias_router.post("/deny")
-async def deny_tool_alias(request: ApprovalRequest):
-    return await deny_tool(request)
-
-
-@alias_router.post("/resume")
-async def resume_tool_alias(request: ResumeRequest):
-    return await resume_tool(request)

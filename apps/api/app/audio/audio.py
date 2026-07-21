@@ -4,7 +4,8 @@ Supports wav and mp3 uploads, validates format, calls ASR provider,
 and saves transcripts. Requires permission approval (medium risk).
 """
 
-import os
+import base64
+import mimetypes
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
@@ -59,44 +60,79 @@ def save_audio_file(content: bytes, original_filename: str, content_type: str) -
 async def transcribe_audio(filepath: str) -> dict:
     """Transcribe audio using ASR provider.
 
-    Currently supports OpenAI Whisper. Returns dict with transcript and metadata.
+    Calls MiMo's chat-completions ASR protocol. Returns dict with transcript
+    and metadata.
 
     Note: This requires permission approval (medium risk) before calling.
     """
-    if settings.mock_agent or not settings.openai_api_key or settings.openai_api_key == "sk-xxx":
-        return {
-            "transcript": "[Mock] 这是模拟的ASR转写结果，实际使用时会调用 Whisper API。",
-            "provider": "mock",
-            "duration_seconds": 0,
-            "language": "zh",
-        }
-
     try:
-        from openai import OpenAI
-        client = OpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-        )
+        if not settings.mimo_api_key.strip():
+            raise RuntimeError("MiMo ASR is not configured")
 
-        with open(filepath, "rb") as audio_file:
-            response = client.audio.transcriptions.create(
-                model=settings.asr_model,
-                file=audio_file,
-                response_format="verbose_json",
-            )
+        import httpx
+
+        audio_bytes = Path(filepath).read_bytes()
+        mime_type = mimetypes.guess_type(filepath)[0] or "audio/wav"
+        audio_data = base64.b64encode(audio_bytes).decode("ascii")
+        payload = {
+            "model": settings.mimo_asr_model,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": f"data:{mime_type};base64,{audio_data}"},
+                }],
+            }],
+            "asr_options": {"language": "auto"},
+        }
+        headers = {
+            "api-key": settings.mimo_api_key,
+            "Authorization": f"Bearer {settings.mimo_api_key}",
+        }
+        response = httpx.post(
+            f"{settings.mimo_base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+        transcript = _extract_mimo_transcript(data)
+        if not transcript:
+            raise RuntimeError("MiMo ASR returned an empty transcript")
 
         return {
-            "transcript": response.text,
-            "provider": settings.asr_provider,
-            "duration_seconds": getattr(response, "duration", 0),
-            "language": getattr(response, "language", "unknown"),
+            "transcript": transcript,
+            "provider": "mimo",
+            "duration_seconds": data.get("duration", 0),
+            "language": data.get("language", "auto"),
         }
     except Exception as e:
         return {
             "transcript": "",
             "error": str(e),
-            "provider": settings.asr_provider,
+            "provider": "mimo",
         }
+
+
+def _extract_mimo_transcript(data: dict) -> str:
+    """Read the response shapes documented by MiMo ASR."""
+    direct = data.get("text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+    choices = data.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    content = (choices[0].get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "".join(
+            str(item.get("text", ""))
+            for item in content
+            if isinstance(item, dict) and item.get("text")
+        ).strip()
+    return ""
 
 
 def save_transcript_to_session(session_id: str, transcript: str, audio_path: str) -> dict:

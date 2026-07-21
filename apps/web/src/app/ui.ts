@@ -9,10 +9,8 @@ export const SESSION_STATUS_STYLES: Record<string, string> = {
 
 export const PROGRESS_STAGES = [
   "input_received",
-  "skill_selected",
   "knowledge_retrieved",
-  "content_scored",
-  "voice_scored",
+  "diagnosis_evaluated",
   "memory_updated",
   "report_generated",
   "output_checked",
@@ -21,10 +19,8 @@ export const PROGRESS_STAGES = [
 
 export const STAGE_LABELS: Record<string, string> = {
   input_received: "接收输入",
-  skill_selected: "匹配技能",
   knowledge_retrieved: "知识检索",
-  content_scored: "内容评分",
-  voice_scored: "语音评分",
+  diagnosis_evaluated: "诊断评估",
   memory_updated: "记忆更新",
   report_generated: "生成报告",
   output_checked: "输出检查",

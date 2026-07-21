@@ -36,21 +36,10 @@ def load_rules() -> dict[str, str]:
     return rules
 
 
-def load_rules_for_skill(skill_name: str) -> str:
-    """Load rules relevant to a specific skill."""
+def load_diagnosis_rules() -> str:
+    """Load the fixed rules for the single-question diagnosis workflow."""
     all_rules = load_rules()
-    parts = [all_rules.get("global", "")]
-
-    # Diagnosis skill gets diagnosis rules
-    if skill_name in ("interview-diagnosis", "answer-rewrite", "followup-coaching"):
-        parts.append(all_rules.get("diagnosis", ""))
-
-    # Audio skill gets audio rules
-    if skill_name == "audio-diagnosis":
-        parts.append(all_rules.get("audio", ""))
-        parts.append(all_rules.get("diagnosis", ""))
-
-    return "\n\n".join(p for p in parts if p)
+    return "\n\n".join(p for p in (all_rules.get("global", ""), all_rules.get("diagnosis", "")) if p)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +56,6 @@ class HookPoint(str, Enum):
 @dataclass
 class HookContext:
     session_id: str = ""
-    skill_name: str = ""
     step: int = 0
     tool_name: str = ""
     tool_params: dict = field(default_factory=dict)
@@ -154,7 +142,7 @@ def create_default_hook_manager() -> HookManager:
 class BudgetConfig:
     max_steps: int = 6
     max_tool_calls: int = 3
-    max_output_chars: int = 2500
+    max_output_chars: int = 5000
     top_k_retrieval: int = 5
 
 
@@ -208,18 +196,15 @@ class HarnessRunner:
     """Runtime harness used by FastAPI orchestration paths."""
 
     TOOL_REQUIRED_PARAMS = {
-        "search_knowledge": {"query"},
-        "score_answer": {"question", "answer"},
-        "analyze_voice_text": {"transcript"},
-        "generate_followup": {"question", "answer"},
+        "search_knowledge": {"question"},
+        "diagnose_interview": {"question", "answer", "reference_answers", "context_instruction", "timeout"},
         "save_memory": {"session_id", "key", "value"},
         "transcribe_audio": {"filepath"},
         "export_report": {"report_id"},
     }
 
-    def __init__(self, session_id: str, skill_name: str = ""):
+    def __init__(self, session_id: str):
         self.session_id = session_id
-        self.skill_name = skill_name
         self.hooks = create_default_hook_manager()
         self.budget = BudgetTracker()
 
@@ -227,15 +212,11 @@ class HarnessRunner:
         cleaned = re.sub(r"\s+", " ", input_text).strip()
         ctx = HookContext(
             session_id=self.session_id,
-            skill_name=self.skill_name,
             input_text=cleaned,
         )
         self.hooks.run(HookPoint.PRE_INPUT, ctx)
         self.budget.record_step()
-        qa_extracted = {
-            "has_question": any(token in cleaned for token in ["面试题", "问题", "question", "？", "?"]),
-            "has_answer": any(token in cleaned for token in ["回答", "answer", "候选"]),
-        }
+        qa_extracted = extract_diagnosis_qa(cleaned)
         return ctx.input_text, qa_extracted
 
     def record_step(self) -> None:
@@ -253,7 +234,6 @@ class HarnessRunner:
             raise ValueError("Tool call budget exceeded")
         ctx = HookContext(
             session_id=self.session_id,
-            skill_name=self.skill_name,
             tool_name=tool_name,
             tool_params=params,
         )
@@ -279,22 +259,32 @@ class HarnessRunner:
 
         ctx = HookContext(
             session_id=self.session_id,
-            skill_name=self.skill_name,
             tool_name=tool_name,
             tool_result=normalized,
         )
         self.hooks.run(HookPoint.POST_TOOL, ctx)
         return ctx.tool_result
 
-    def post_output(self, output_text: str) -> tuple[str, dict]:
-        self.budget.record_output(len(output_text))
+    def post_output(self, output_text: str | dict) -> tuple[str, dict]:
+        """Run post-output hooks and validate output.
+
+        Accepts both raw text and structured report dict.
+        """
+        if isinstance(output_text, dict):
+            # Structured contract validation
+            result = validate_report_structure(output_text)
+            text = render_report_markdown(output_text)
+        else:
+            # Legacy text-based check
+            text = output_text
+            result = check_output(output_text)
+
+        self.budget.record_output(len(text))
         ctx = HookContext(
             session_id=self.session_id,
-            skill_name=self.skill_name,
-            output_text=output_text,
+            output_text=text,
         )
         self.hooks.run(HookPoint.POST_OUTPUT, ctx)
-        result = check_output(ctx.output_text)
         if self.budget.is_output_over_budget():
             result["valid"] = False
             result["issues"].append("Output budget exceeded")
@@ -302,21 +292,157 @@ class HarnessRunner:
 
 
 # ---------------------------------------------------------------------------
-# Output Checker
+# Output Checker (structural contract)
 # ---------------------------------------------------------------------------
 
-def check_output(output: str) -> dict:
-    """Check Agent output against quality requirements.
+REQUIRED_REPORT_FIELDS = [
+    "question",
+    "answer",
+    "overall_score",
+    "content_scores",
+    "voice_scores",
+    "followups",
+    "sources",
+    "user_covered",
+    "user_missing",
+    "exam_points",
+]
 
-    Returns dict with:
-        valid: bool
-        issues: list[str]
-        recommendations: list[str]
+REQUIRED_REPORT_SECTIONS = [
+    "原始面试题",
+    "参考答案对标",
+    "用户已覆盖",
+    "用户缺失",
+    "内容维度评分",
+    "语音维度评分",
+    "改进建议",
+    "可能追问",
+    "知识来源",
+]
+
+
+def validate_report_structure(report: dict) -> dict:
+    """Validate a structured diagnosis report against the internal contract.
+
+    Accepts a structured report dict (not Markdown text).
+    Returns dict with valid, issues, recommendations.
+    """
+    issues: list[str] = []
+    recommendations: list[str] = []
+
+    if not isinstance(report, dict):
+        return {
+            "valid": False,
+            "issues": ["Report is not a structured object"],
+            "recommendations": ["Generate a structured report object first"],
+        }
+
+    # Required top-level fields
+    for field in REQUIRED_REPORT_FIELDS:
+        value = report.get(field)
+        if value is None:
+            issues.append(f"Missing required field: {field}")
+
+    # Content scores
+    cs = report.get("content_scores")
+    if isinstance(cs, dict):
+        dims = cs.get("dimensions")
+        if isinstance(dims, dict):
+            expected_dims = {"concept_accuracy", "structure_completeness",
+                            "engineering_depth", "example_quality", "question_alignment"}
+            missing = expected_dims - set(dims.keys())
+            if missing:
+                issues.append(f"Missing content dimensions: {missing}")
+            for k, v in dims.items():
+                if not isinstance(v, dict) or "score" not in v or "explanation" not in v:
+                    issues.append(f"Invalid content dimension entry: {k}")
+        else:
+            issues.append("content_scores.dimensions is missing or not a dict")
+    else:
+        issues.append("content_scores is missing")
+
+    # Voice scores
+    vs = report.get("voice_scores")
+    if isinstance(vs, dict):
+        dims = vs.get("dimensions")
+        if isinstance(dims, dict):
+            expected_dims = {"fluency", "filler_words", "redundancy",
+                            "spoken_clarity", "answer_pacing"}
+            missing = expected_dims - set(dims.keys())
+            if missing:
+                issues.append(f"Missing voice dimensions: {missing}")
+            for k, v in dims.items():
+                if not isinstance(v, dict) or "score" not in v or "explanation" not in v:
+                    issues.append(f"Invalid voice dimension entry: {k}")
+        else:
+            issues.append("voice_scores.dimensions is missing or not a dict")
+    else:
+        issues.append("voice_scores is missing")
+
+    # Overall score
+    os_ = report.get("overall_score")
+    if not isinstance(os_, (int, float)):
+        issues.append("overall_score must be a number")
+
+    # Followups
+    fu = report.get("followups")
+    if not isinstance(fu, list):
+        issues.append("followups must be a list")
+    else:
+        for i, item in enumerate(fu):
+            if not isinstance(item, dict) or "question" not in item or "why" not in item:
+                issues.append(f"Invalid followup entry at index {i}")
+
+    # Sources
+    src = report.get("sources")
+    if not isinstance(src, list):
+        issues.append("sources must be a list")
+
+    points = report.get("exam_points")
+    if not isinstance(points, list):
+        issues.append("exam_points must be a list")
+    else:
+        for item in points:
+            if not isinstance(item, dict) or item.get("status") not in {"covered", "partial", "missing"}:
+                issues.append("Invalid exam point entry")
+                continue
+            evidence = item.get("evidence")
+            if item["status"] in {"covered", "partial"} and not isinstance(evidence, str):
+                issues.append("Covered or partial exam points require evidence")
+            if item["status"] == "missing" and evidence:
+                issues.append("Missing exam points cannot contain evidence")
+
+    # Sections (Markdown sections if present)
+    sections = report.get("sections")
+    if isinstance(sections, dict):
+        for section in REQUIRED_REPORT_SECTIONS:
+            if section not in sections:
+                issues.append(f"Missing report section: {section}")
+    elif isinstance(sections, list):
+        found = set(sections)
+        missing = set(REQUIRED_REPORT_SECTIONS) - found
+        if missing:
+            issues.append(f"Missing report sections: {missing}")
+
+    valid = len(issues) == 0
+    if not valid:
+        recommendations.append("Ensure all required fields and sections are present")
+
+    return {
+        "valid": valid,
+        "issues": issues,
+        "recommendations": recommendations,
+    }
+
+
+def check_output(output: str) -> dict:
+    """Legacy text-based output check (deprecated for new code).
+
+    Prefer validate_report_structure() for new diagnosis flows.
     """
     issues = []
     recommendations = []
 
-    # Check for content dimension scores
     content_dims = ["concept_accuracy", "structure_completeness",
                     "engineering_depth", "example_quality", "question_alignment"]
     content_found = []
@@ -327,7 +453,6 @@ def check_output(output: str) -> dict:
         missing = set(content_dims) - set(content_found)
         issues.append(f"Missing content dimensions: {missing}")
 
-    # Check for voice dimension scores
     voice_dims = ["fluency", "filler_words", "redundancy",
                   "spoken_clarity", "answer_pacing"]
     voice_found = []
@@ -338,16 +463,13 @@ def check_output(output: str) -> dict:
         missing = set(voice_dims) - set(voice_found)
         issues.append(f"Missing voice dimensions: {missing}")
 
-    # Check for original question preservation
     if "面试题" not in output and "原始" not in output:
         issues.append("Missing original question")
 
-    # Check for improvement advice
     if "改进" not in output and "建议" not in output and "improve" not in output.lower():
         issues.append("Missing improvement advice")
 
     valid = len(issues) == 0
-
     if not valid:
         recommendations.append("Consider adding missing sections before finalizing")
 
@@ -358,41 +480,128 @@ def check_output(output: str) -> dict:
     }
 
 
-def generate_fallback_report(question: str = "", answer: str = "") -> str:
-    """Generate a minimal fallback report when output checking fails."""
-    return f"""# 面试诊断报告（部分）
+def render_report_markdown(report: dict) -> str:
+    """Render a structured report dict to Markdown."""
+    lines = [
+        "# 面试回答诊断报告",
+        "",
+        f"**总分：{report.get('overall_score', 0)}/10**",
+        "",
+        "## 原始面试题",
+        report.get("question", ""),
+        "",
+        "## 用户回答摘要",
+        str(report.get("answer", ""))[:300] + ("..." if len(str(report.get("answer", ""))) > 300 else ""),
+        "",
+        "## 参考答案对标",
+    ]
 
-## 原始信息
+    # Reference alignment (from sources/knowledge)
+    ref_info = report.get("reference_alignment", "")
+    if ref_info:
+        lines.append(ref_info)
+    else:
+        lines.append("- 见下方知识来源")
 
-**面试题：** {question or "未提供"}
+    # Content scores
+    lines.extend(["", "## 内容维度评分", "", "| 维度 | 评分 | 说明 |", "|------|------|------|"])
+    cs = report.get("content_scores", {})
+    dim_labels = {
+        "concept_accuracy": "概念准确性",
+        "structure_completeness": "结构完整性",
+        "engineering_depth": "工程深度",
+        "example_quality": "示例质量",
+        "question_alignment": "问题契合度",
+    }
+    for dim_name, dim_data in cs.get("dimensions", {}).items():
+        label = dim_labels.get(dim_name, dim_name)
+        lines.append(f"| {label} ({dim_name}) | {dim_data.get('score', 0)}/10 | {dim_data.get('explanation', '')} |")
+    lines.append(f"| **内容总分** | **{cs.get('total', 0)}/{cs.get('max_total', 50)}** | |")
 
-**候选回答：** {answer or "未提供"}
+    # Voice scores
+    lines.extend(["", "## 语音维度评分", "", "| 维度 | 评分 | 说明 |", "|------|------|------|"])
+    vs = report.get("voice_scores", {})
+    voice_labels = {
+        "fluency": "流畅度",
+        "filler_words": "口头禅控制",
+        "redundancy": "冗余度",
+        "spoken_clarity": "口语清晰度",
+        "answer_pacing": "回答节奏",
+    }
+    for dim_name, dim_data in vs.get("dimensions", {}).items():
+        label = voice_labels.get(dim_name, dim_name)
+        lines.append(f"| {label} ({dim_name}) | {dim_data.get('score', 0)}/10 | {dim_data.get('explanation', '')} |")
+    lines.append(f"| **语音总分** | **{vs.get('total', 0)}/{vs.get('max_total', 50)}** | |")
 
-## 内容维度评分
+    # Candidate/reference comparison is rendered independently from score tables.
+    lines.extend(["", "## 用户已覆盖"])
+    user_covered = report.get("user_covered", [])
+    if user_covered:
+        for item in user_covered[:5]:
+            if isinstance(item, dict):
+                lines.append(f"- **{item.get('point', '')}**：{item.get('explanation', '')}（回答证据：{item.get('evidence', '')}）")
+            else:
+                lines.append(f"- {item}")
+    else:
+        lines.append("- 未识别到明确的已覆盖要点")
 
-| 维度 | 评分 | 说明 |
-|------|------|------|
-| 概念准确性 | */10 | 自动评分未完成 |
-| 结构完整性 | */10 | 自动评分未完成 |
-| 工程深度 | */10 | 自动评分未完成 |
-| 示例质量 | */10 | 自动评分未完成 |
-| 问题契合度 | */10 | 自动评分未完成 |
+    lines.extend(["", "## 用户缺失"])
+    user_missing = report.get("user_missing", [])
+    if user_missing:
+        for item in user_missing[:5]:
+            if isinstance(item, dict):
+                evidence = f"（已提及：{item['evidence']}）" if item.get("evidence") else ""
+                lines.append(f"- **{item.get('point', '')}**：{item.get('explanation', '')}{evidence}")
+            else:
+                lines.append(f"- {item}")
+    else:
+        lines.append("- 未识别到明显缺失要点")
 
-## 语音维度评分
+    # Improvement
+    lines.extend(["", "## 改进建议"])
+    improvements = report.get("improvements", ["1. 针对薄弱维度进行专项练习", "2. 使用 STAR 原则组织回答结构"])
+    lines.extend(improvements[:8])
 
-| 维度 | 评分 | 说明 |
-|------|------|------|
-| 流畅度 | */10 | 自动评分未完成 |
-| 口头禅控制 | */10 | 自动评分未完成 |
-| 冗余度 | */10 | 自动评分未完成 |
-| 口语清晰度 | */10 | 自动评分未完成 |
-| 回答节奏 | */10 | 自动评分未完成 |
+    # Follow-ups
+    followups = report.get("followups", [])
+    lines.extend(["", "## 可能追问"])
+    if followups:
+        for i, fq in enumerate(followups[:5], 1):
+            lines.append(f"{i}. {fq.get('question', '')}（{fq.get('why', '')}）")
+    else:
+        lines.append("- 暂无")
 
-## 说明
+    sources = report.get("sources", [])
+    lines.extend(["", "## 知识来源"])
+    if sources:
+        lines.extend(f"- {s}" for s in sources[:5])
+    else:
+        lines.append("- 未命中知识来源")
 
-自动诊断未能完成完整分析。请检查输入是否完整，或稍后重试。
+    return "\n".join(lines)
 
----
 
-*Report generated by OfferPilot Lite (fallback mode)*
-"""
+def extract_diagnosis_qa(text: str) -> dict:
+    """Extract interview question and candidate answer from diagnosis text."""
+    cleaned = (text or "").strip()
+    question = ""
+    answer = ""
+    patterns = [
+        r"面试题[：:]\s*(?P<question>.*?)(?:回答|我的回答|候选人回答)[：:]\s*(?P<answer>.*)$",
+        r"问题[：:]\s*(?P<question>.*?)(?:回答|我的回答|候选人回答)[：:]\s*(?P<answer>.*)$",
+        r"Question[：:]\s*(?P<question>.*?)(?:Answer|回答)[：:]\s*(?P<answer>.*)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            question = match.group("question").strip()
+            answer = match.group("answer").strip()
+            break
+    has_question = bool(question) or any(token in cleaned for token in ["面试题", "问题", "question", "？", "?"])
+    has_answer = bool(answer) or any(token in cleaned for token in ["回答", "answer", "候选"])
+    return {
+        "has_question": has_question and bool(question or cleaned),
+        "has_answer": has_answer and bool(answer or cleaned),
+        "question": question,
+        "answer": answer,
+    }

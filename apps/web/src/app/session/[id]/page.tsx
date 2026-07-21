@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { PROGRESS_STAGES, STAGE_LABELS, getSessionStatusStyle } from "../../ui";
+import { withProfileHeaders } from "../../profile";
 
 const API = "/api";
 
@@ -41,7 +42,7 @@ type PendingApproval = {
   risk_level: string;
   params: any;
   message?: string;
-  source?: "chat" | "audio" | "diagnose";
+  source?: "coach" | "audio" | "diagnose";
 };
 
 type AudioStatus =
@@ -73,6 +74,13 @@ function summarize(value: unknown, max = 240) {
   if (value == null) return "";
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function apiErrorMessage(payload: any, fallback: string) {
+  const code = payload?.error?.code;
+  if (code === "llm_unavailable") return "模型服务未配置或暂不可用。";
+  if (code === "output_check_failed") return "模型输出未通过结构检查，请稍后重试。";
+  return payload?.error?.message || payload?.detail || fallback;
 }
 
 function extractTraceId(session: any, checkpoint: any, events: any[]) {
@@ -128,19 +136,19 @@ export default function SessionPage() {
   const refreshSessionState = useCallback(async () => {
     const [sessionResult, messagesResult, progressResult, checkpointResult] =
       await Promise.allSettled([
-        fetch(`${API}/sessions/${sessionId}`).then((r) => {
+        fetch(`${API}/sessions/${sessionId}`, { headers: withProfileHeaders() }).then((r) => {
           if (!r.ok) throw new Error(`Session ${r.status}`);
           return r.json();
         }),
-        fetch(`${API}/sessions/${sessionId}/messages?n=100`).then((r) => {
+        fetch(`${API}/sessions/${sessionId}/messages?n=100`, { headers: withProfileHeaders() }).then((r) => {
           if (!r.ok) throw new Error(`Messages ${r.status}`);
           return r.json();
         }),
-        fetch(`${API}/sessions/${sessionId}/progress`).then((r) => {
+        fetch(`${API}/sessions/${sessionId}/progress`, { headers: withProfileHeaders() }).then((r) => {
           if (!r.ok) throw new Error(`Progress ${r.status}`);
           return r.json();
         }),
-        fetch(`${API}/sessions/${sessionId}/checkpoints/latest`).then((r) => {
+        fetch(`${API}/sessions/${sessionId}/checkpoints/latest`, { headers: withProfileHeaders() }).then((r) => {
           if (r.status === 404) return null;
           if (!r.ok) throw new Error(`Checkpoint ${r.status}`);
           return r.json();
@@ -195,7 +203,7 @@ export default function SessionPage() {
     setTraceLoading(true);
     setTraceError("");
     try {
-      const res = await fetch(`${API}/traces/${traceId}`);
+      const res = await fetch(`${API}/traces/${traceId}`, { headers: withProfileHeaders() });
       if (!res.ok) throw new Error(`Trace ${res.status}`);
       setTrace(await res.json());
     } catch (err: any) {
@@ -222,16 +230,16 @@ export default function SessionPage() {
     abortRef.current = abortController;
 
     try {
-      const res = await fetch(`${API}/chat`, {
+      const res = await fetch(`${API}/coach`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withProfileHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ message: userContent, session_id: sessionId }),
         signal: abortController.signal,
       });
 
       if (!res.ok) {
         const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail || `Chat request failed: ${res.status}`);
+        throw new Error(apiErrorMessage(detail, `Chat request failed: ${res.status}`));
       }
 
       const reader = res.body?.getReader();
@@ -274,22 +282,23 @@ export default function SessionPage() {
                 updateProgress(
                   event.tool_name === "search_knowledge"
                     ? "knowledge_retrieved"
-                    : event.tool_name === "score_answer"
-                      ? "content_scored"
-                      : event.tool_name === "analyze_voice_text"
-                        ? "voice_scored"
-                        : "skill_selected"
+                    : "diagnosis_evaluated"
                 );
                 break;
               case "tool_result":
-                if (event.tool_name === "score_answer") updateProgress("content_scored");
-                if (event.tool_name === "analyze_voice_text") updateProgress("voice_scored");
+                if (event.tool_name === "run_diagnosis") {
+                  updateProgress("diagnosis_evaluated");
+                  if (event.result?.report) setReportMarkdown(event.result.report);
+                }
                 if (event.tool_name === "save_memory") updateProgress("memory_updated");
                 break;
               case "done":
                 updateProgress("report_generated");
                 updateProgress("output_checked");
                 setReportMarkdown(event.final_output || "");
+                break;
+              case "final_response":
+                if (event.content) setReportMarkdown(event.content);
                 break;
               case "run_complete":
                 if (event.trace_id) setTraceId(event.trace_id);
@@ -301,7 +310,7 @@ export default function SessionPage() {
                 }
                 break;
               case "error":
-                setActionMessage(event.message || "执行过程中出现错误。");
+                setActionMessage(apiErrorMessage(event, event.message || "执行过程中出现错误。"));
                 break;
               case "permission_required":
                 waitingApproval = true;
@@ -311,7 +320,7 @@ export default function SessionPage() {
                   risk_level: event.risk_level || "",
                   params: event.params,
                   message: event.message,
-                  source: "chat",
+                  source: "coach",
                 });
                 setActionMessage("需要确认工具调用。");
                 break;
@@ -369,7 +378,7 @@ export default function SessionPage() {
     try {
       const approveResp = await fetch(`${API}/permission/approve`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withProfileHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           request_id: pendingApproval.request_id,
           session_id: sessionId,
@@ -377,12 +386,13 @@ export default function SessionPage() {
       });
       if (!approveResp.ok) {
         const detail = await approveResp.json().catch(() => ({}));
-        throw new Error(detail.detail || `Approve failed: ${approveResp.status}`);
+        throw new Error(apiErrorMessage(detail, `Approve failed: ${approveResp.status}`));
       }
 
-      const resumeResp = await fetch(`${API}/permission/resume`, {
+      const resumeUrl = pendingApproval.source === "coach" ? `${API}/coach/resume` : `${API}/permission/resume`;
+      const resumeResp = await fetch(resumeUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withProfileHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           request_id: pendingApproval.request_id,
           session_id: sessionId,
@@ -390,9 +400,25 @@ export default function SessionPage() {
       });
       if (!resumeResp.ok) {
         const detail = await resumeResp.json().catch(() => ({}));
-        throw new Error(detail.detail || `Resume failed: ${resumeResp.status}`);
+        throw new Error(apiErrorMessage(detail, `Resume failed: ${resumeResp.status}`));
       }
 
+      if (pendingApproval.source === "coach") {
+        const stream = await resumeResp.text();
+        for (const block of stream.split("\n\n")) {
+          if (!block.startsWith("data: ")) continue;
+          const event: EventItem = JSON.parse(block.slice(6));
+          if (event.type === "text_delta" && event.content) {
+            setMessages((prev) => [...prev, { role: "assistant", content: event.content || "" }]);
+          }
+          if (event.type === "run_complete" && event.trace_id) setTraceId(event.trace_id);
+        }
+        updateProgress("memory_updated");
+        setActionMessage("记忆已保存，教练已继续本轮回复。");
+        setPendingApproval(null);
+        await refreshSessionState();
+        return;
+      }
       const resumeData = await resumeResp.json();
       if (pendingApproval.tool_name === "save_memory") {
         updateProgress("memory_updated");
@@ -403,7 +429,7 @@ export default function SessionPage() {
           setAudioFile(null);
           setAudioStatus("transcribed");
           setAudioInfo(
-            `转写完成：${resumeData.provider || "mock"}，${resumeData.transcript.length} 字。可继续诊断。`
+            `转写完成：${resumeData.provider || ""}，${resumeData.transcript.length} 字。可继续诊断。`
           );
         } else {
           setAudioStatus("manual");
@@ -434,7 +460,7 @@ export default function SessionPage() {
     try {
       const denyResp = await fetch(`${API}/permission/deny`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withProfileHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           request_id: pendingApproval.request_id,
           session_id: sessionId,
@@ -442,7 +468,7 @@ export default function SessionPage() {
       });
       if (!denyResp.ok) {
         const detail = await denyResp.json().catch(() => ({}));
-        throw new Error(detail.detail || `Deny failed: ${denyResp.status}`);
+        throw new Error(apiErrorMessage(detail, `Deny failed: ${denyResp.status}`));
       }
       const deniedTool = pendingApproval.tool_name;
       setPendingApproval(null);
@@ -487,10 +513,11 @@ export default function SessionPage() {
     try {
       const res = await fetch(`${API}/audio/upload`, {
         method: "POST",
+        headers: withProfileHeaders(),
         body: formData,
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Upload failed: ${res.status}`);
+      if (!res.ok) throw new Error(apiErrorMessage(data, `Upload failed: ${res.status}`));
 
       if (data.status === "approval_required") {
         setPendingApproval({
@@ -507,7 +534,7 @@ export default function SessionPage() {
         setInput(data.transcript);
         setAudioFile(null);
         setAudioStatus("transcribed");
-        setAudioInfo(`转写完成：${data.provider || "mock"}，${data.transcript.length} 字。`);
+        setAudioInfo(`转写完成：${data.provider || ""}，${data.transcript.length} 字。`);
       } else if (data.status === "asr_failed") {
         setAudioStatus("manual");
         setAudioError(`转写失败: ${data.error || "未知错误"}。请手动粘贴 transcript。`);
@@ -535,10 +562,11 @@ export default function SessionPage() {
     try {
       const res = await fetch(`${API}/audio/transcript/manual`, {
         method: "POST",
+        headers: withProfileHeaders(),
         body: formData,
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || `Manual transcript failed: ${res.status}`);
+      if (!res.ok) throw new Error(apiErrorMessage(data, `Manual transcript failed: ${res.status}`));
       setInput(data.transcript || manualTranscript.trim());
       setManualTranscript("");
       setAudioFile(null);

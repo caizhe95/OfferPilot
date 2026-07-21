@@ -1,176 +1,104 @@
-"""Tests for diagnosis business tools and memory."""
+"""Tests for the unified evidence-grounded diagnosis contract."""
 
 import pytest
-from app.core.database import init_db, get_db
+from types import SimpleNamespace
+
+from app.core.errors import AppError
 from app.diagnosis.diagnosis import (
-    score_answer,
-    analyze_voice_text,
-    generate_followup,
-    save_memory,
-    get_memories,
-    save_diagnosis_report,
-    get_diagnosis_report,
+    diagnose_interview,
+    normalize_diagnosis_result,
 )
-from app.session.session import create_session
+from app.diagnosis.workflow import _looks_corrupted_text, run_diagnosis
 
 
-class TestScoreAnswer:
-    """Tests for answer scoring."""
+def _result(answer: str) -> dict:
+    return {
+        "exam_points": [{
+            "point": "说明 ReAct 的推理与行动循环",
+            "status": "covered",
+            "evidence": answer,
+            "explanation": "回答明确描述了循环。",
+        }],
+        "content_dimensions": {
+            key: {"score": 7, "explanation": "内容可用"}
+            for key in ["concept_accuracy", "structure_completeness", "engineering_depth", "example_quality", "question_alignment"]
+        },
+        "voice_dimensions": {
+            key: {"score": 7, "explanation": "表达清楚"}
+            for key in ["fluency", "filler_words", "redundancy", "spoken_clarity", "answer_pacing"]
+        },
+        "improvements": ["补充工具失败处理。"],
+        "followups": [{"question": "工具调用失败怎么办？", "why": "验证容错能力"}],
+        "memory_candidates": [{"key": "weakness", "value": "补充容错细节", "category": "diagnosis"}],
+    }
 
-    def test_short_answer_low_score(self):
-        result = score_answer("什么是 ReAct？", "ReAct 就是推理加行动")
-        content_total = result["total"]
-        assert content_total < 30  # Short answer should score low
 
-    def test_off_topic_answer_low_alignment(self):
-        result = score_answer(
-            "什么是 Context Window 管理？",
-            "ReAct 是一种让模型在思考和行动之间循环的模式，它可以让 Agent 更智能",
+def test_diagnose_interview_returns_all_sections():
+    answer = "ReAct 让模型在推理和行动之间循环。"
+    result = diagnose_interview(
+        session_id="test", question="什么是 ReAct？", answer=answer,
+        knowledge_context=[], context_instruction="测试规则", timeout=10,
+    )
+    assert set(result["content_scores"]["dimensions"]) == {
+        "concept_accuracy", "structure_completeness", "engineering_depth", "example_quality", "question_alignment",
+    }
+    assert result["exam_points"][0]["evidence"] in answer
+
+
+def test_covered_evidence_must_be_in_answer():
+    raw = _result("ReAct 是推理和行动循环。")
+    raw["exam_points"][0]["evidence"] = "模型没有说过的内容"
+    with pytest.raises(ValueError, match="evidence"):
+        normalize_diagnosis_result(raw, "ReAct 是推理和行动循环。", "test")
+
+
+def test_missing_exam_point_cannot_have_evidence():
+    raw = _result("ReAct 是推理和行动循环。")
+    raw["exam_points"][0].update({"status": "missing", "evidence": "ReAct"})
+    with pytest.raises(ValueError, match="missing"):
+        normalize_diagnosis_result(raw, "ReAct 是推理和行动循环。", "test")
+
+
+def test_context_boundaries_are_sent_to_the_single_llm_call(monkeypatch):
+    import app.diagnosis.diagnosis as diagnosis_module
+
+    captured = {}
+    answer = "ReAct 是推理和行动循环。"
+
+    call_count = 0
+
+    def fake_completion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        captured.update(kwargs)
+        return SimpleNamespace(data=_result(answer), source="llm")
+
+    monkeypatch.setattr(diagnosis_module, "structured_json_completion", fake_completion)
+    diagnose_interview(
+        session_id="test", question="什么是 ReAct？", answer=answer,
+        knowledge_context=[], context_instruction="上下文规则", timeout=10,
+    )
+    assert "不是知识库问答助手" in captured["system_prompt"]
+    assert "面试题 + 候选人回答" in captured["system_prompt"]
+    assert "上下文规则" in captured["system_prompt"]
+    assert call_count == 1
+
+
+def test_legacy_scoring_endpoints_are_not_registered(client):
+    assert client.post("/api/tools/score-answer", json={}).status_code == 404
+    assert client.post("/api/tools/analyze-voice-text", json={}).status_code == 404
+    assert client.post("/api/tools/generate-followup", json={}).status_code == 404
+
+
+def test_diagnosis_rejects_encoding_placeholder_text():
+    assert _looks_corrupted_text("??? RAG ??????")
+    assert not _looks_corrupted_text("如何用 RAG 处理检索失败？")
+    with pytest.raises(AppError, match="appears corrupted"):
+        run_diagnosis(
+            session_id="test",
+            profile_id="profile",
+            trace_id="trace",
+            question="??? RAG ??????",
+            answer="???? FTS5 ?????? Embedding",
+            timeout=10,
         )
-        alignment = result["dimensions"]["question_alignment"]["score"]
-        # Off-topic should have low alignment
-        assert alignment < 7
-
-    def test_good_answer_scores_higher(self):
-        good_answer = """
-首先，Context Window 管理是 Agent 工程中的核心问题。
-
-首先是 Token 计数，不能靠字符数，要用 tiktoken 精确计算。
-
-其次是 Sliding Window 策略，保留最近 N 轮对话。
-
-第三是 Summarization，对旧消息生成摘要压缩。
-
-最后是分层上下文策略，将 system prompt、memory、history 和当前 input 分预算管理。
-
-在生产环境，我们遇到过搜索结果太长导致 context 爆炸的问题，解决方式是限制搜索结果长度和数量。
-
-总之，Context Window 管理的核心是在有限窗口内保持对话连贯性，需要多种策略配合。
-        """
-        result = score_answer("什么是 Context Window 管理？", good_answer)
-        assert result["total"] > 25  # Good answer should score higher
-        assert result["total"] <= 50
-
-    def test_all_dimensions_present(self):
-        result = score_answer("问题", "一个中等长度的回答" * 10)
-        dims = result["dimensions"]
-        expected = ["concept_accuracy", "structure_completeness", "engineering_depth",
-                    "example_quality", "question_alignment"]
-        for dim in expected:
-            assert dim in dims
-            assert "score" in dims[dim]
-            assert "explanation" in dims[dim]
-
-
-class TestAnalyzeVoiceText:
-    """Tests for voice analysis from transcripts."""
-
-    def test_all_voice_dimensions_present(self):
-        result = analyze_voice_text("一个正常的回答文本" * 20)
-        dims = result["dimensions"]
-        expected = ["fluency", "filler_words", "redundancy", "spoken_clarity", "answer_pacing"]
-        for dim in expected:
-            assert dim in dims
-            assert "score" in dims[dim]
-
-    def test_filler_words_detected(self):
-        result = analyze_voice_text("嗯，就是那个，就是说，ReAct 的话，对吧，就是一种，嗯，循环模式")
-        filler_score = result["dimensions"]["filler_words"]["score"]
-        assert filler_score < 7  # Lots of fillers should lower score
-
-    def test_redundant_text_lower_score(self):
-        result = analyze_voice_text(
-            "ReAct 是一种很好的模式，ReAct 模式很好用，ReAct 模式是非常好的一种模式。" * 10
-        )
-        redundancy_score = result["dimensions"]["redundancy"]["score"]
-        # Redundant text should have lower score
-        assert redundancy_score <= 8
-
-
-class TestGenerateFollowup:
-    """Tests for follow-up question generation."""
-
-    def test_generates_followups(self):
-        followups = generate_followup(
-            "什么是 ReAct？",
-            "ReAct 是推理加行动",
-            weaknesses=["engineering_depth:2", "example_quality:2"],
-        )
-        assert len(followups) > 0
-        for f in followups:
-            assert "question" in f
-            assert "why" in f
-
-    def test_followup_limit(self):
-        followups = generate_followup("Q", "A", weaknesses=["concept_accuracy:3"] * 10)
-        assert len(followups) <= 5
-
-    def test_fallback_followups(self):
-        followups = generate_followup("Q", "A", weaknesses=[])
-        assert len(followups) > 0
-
-
-class TestMemory:
-    """Tests for memory storage and retrieval."""
-
-    def test_save_memory(self):
-        init_db()
-        session = create_session()
-        entry = save_memory(session["id"], "weakness", "poor structure", "diagnosis")
-        assert entry["key"] == "weakness"
-        assert entry["value"] == "poor structure"
-        assert entry["category"] == "diagnosis"
-
-    def test_get_memories_by_session(self):
-        init_db()
-        session = create_session()
-        save_memory(session["id"], "weakness", "poor structure", "diagnosis")
-        save_memory(session["id"], "strength", "good examples", "diagnosis")
-
-        memories = get_memories(session_id=session["id"])
-        assert len(memories) == 2
-
-    def test_get_memories_by_key(self):
-        init_db()
-        session = create_session()
-        save_memory(session["id"], "weakness", "short answers", "diagnosis")
-
-        memories = get_memories(key="weakness")
-        assert len(memories) >= 1
-
-    def test_first_diagnosis_saves_weakness(self):
-        """Simulate: first diagnosis saves weakness, second reads it."""
-        init_db()
-        session1 = create_session()
-        save_memory(session1["id"], "weakness", "engineering_depth_low", "diagnosis")
-
-        # Second diagnosis
-        session2 = create_session()
-        # Read memories from previous sessions
-        all_weaknesses = get_memories(key="weakness")
-        assert len(all_weaknesses) >= 1
-        assert any(m["value"] == "engineering_depth_low" for m in all_weaknesses)
-
-
-class TestDiagnosisReport:
-    """Tests for diagnosis report storage."""
-
-    def test_save_and_get_report(self):
-        init_db()
-        session = create_session()
-        report = save_diagnosis_report(
-            session["id"],
-            "什么是 ReAct？",
-            "ReAct 就是推理加行动",
-            {"concept_accuracy": {"score": 5, "explanation": "test"}},
-            {"fluency": {"score": 7, "explanation": "test"}},
-            60.0,
-            "# Report\n\nTest report markdown",
-        )
-        assert "id" in report
-
-        retrieved = get_diagnosis_report(report["id"])
-        assert retrieved is not None
-        assert retrieved["overall_score"] == 60.0
-        assert retrieved["question"] == "什么是 ReAct？"
-        assert "Report" in retrieved["report_markdown"]

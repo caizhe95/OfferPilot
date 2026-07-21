@@ -46,34 +46,27 @@
 - 实现 approval / deny
 - 实现 waiting_approval
 - 实现 audit_log
-- 实现拒绝后的 fallback
+- 实现拒绝后的明确失败状态
 
 **通过标准：** low 自动允许。medium/high 触发确认。critical 拒绝。approve 后恢复 running。deny 后记录 audit。pytest 通过。
 
-## Phase 5：TS pi-mono Agent 服务
+## Phase 5：Python 手写 Agent Loop
 
-- 初始化 apps/agent-ts
-- 接入 pi-mono
-- 实现 OpenAI-compatible provider
-- 实现 MockProvider
-- 注册工具 schema
-- 实现 FastAPI tool client
-- 实现 /agent/run 和 /agent/run-stream
-- 输出标准事件流
+- 初始化 `apps/api/app/agent`
+- 实现 Python Tool Registry
+- 接入现有知识检索、评分、语音分析、追问和 memory permission
+- `/api/coach` 是唯一产品入口；Coach Loop 使用原生 tool_calls，正式评分通过确定性 `run_diagnosis` 工具执行。
+- 输出标准 SSE 事件流
 
-**通过标准：** Mock 模式可运行。Agent 可调用 search_knowledge。工具失败返回结构化错误。流式事件包含 tool_call、tool_result、text_delta、done。Vitest 通过。
+**通过标准：** Agent 可调用 search_knowledge。工具失败返回结构化错误。流式事件包含 tool_call、tool_result、text_delta、done。pytest 通过。
 
-## Phase 6：Skills 按 skill-creator 规范落地
+## Phase 6：固定诊断规则收敛
 
-- 为每个 Skill 创建独立 hyphen-case 文件夹
-- 每个 Skill 创建 SKILL.md，frontmatter 只包含 name 和 description
-- description 写清触发条件
-- SKILL.md 主体保持精简
-- 评分细则、输出格式、追问模式放入 references/
-- 实现 Skills loader 和 intent matcher
-- 增加 Skill validation
+- 评分 rubric、考点证据约束和报告结构收敛到 `harness/rules/`。
+- 不实现 Skills loader、意图匹配或模型自主工具选择。
+- Python Loop 固定执行检索、诊断、校验与审批流程。
 
-**通过标准：** Skills 轻量、高内聚、低耦合。Skill 可迁移。Skill 不硬编码内部路径。Agent 能基于 Skill 稳定选择工具。
+**通过标准：** 规则可审阅，正式链路没有动态 Skill 路由。
 
 ## Phase 7：Rules / Hooks / Budget / Output Checker
 
@@ -81,15 +74,13 @@
 - 编写 global、diagnosis、audio rules
 - 实现 pre-input、pre-tool、post-tool、post-output hooks
 - 实现预算控制
-- 实现 output checker 和 fallback report
+- 实现 output checker 和结构化失败返回
 
-**通过标准：** 重复工具调用被拦截。超预算终止。缺少评分触发修复或 fallback。输出必须包含内容维度和语音维度。
+**通过标准：** 重复工具调用被拦截。超预算终止。缺少评分返回结构化错误。输出必须包含内容维度和语音维度。
 
 ## Phase 8：诊断业务工具
 
-- 实现 score_answer
-- 实现 analyze_voice_text
-- 实现 generate_followup
+- 实现一次结构化 `diagnose_interview` 调用，返回考点证据、内容/表达评分、建议、追问和记忆候选
 - 实现 save_memory
 - 实现 report 保存
 - 调整 Markdown 报告模板
@@ -100,7 +91,7 @@
 
 - 实现 memory store / summary / extraction
 - 实现 context builder
-- 注入 Rules、Skill、Recent Messages、Memory、Knowledge
+- 注入固定 Rules、同 Profile 的已审批 Memory、Recent Messages、Knowledge
 - 实现上下文长度控制
 
 **通过标准：** 第一次诊断保存 weakness。第二次诊断读取 weakness。save_memory 需要权限确认。context 超长可压缩或截断。
@@ -111,9 +102,9 @@
 - 实现 /api/traces/{trace_id}
 - 编写至少 12 条 eval case
 - 实现 eval runner
-- 支持 mock eval 和真实模型可选 eval
+- 支持 eval 返回结构化结果
 
-**通过标准：** trace 能记录完整链路。eval runner 可运行。失败原因清晰。mock eval 稳定。
+**通过标准：** trace 能记录完整链路。eval runner 可运行。失败原因清晰。
 
 ## Phase 11：Web UI
 
@@ -131,8 +122,8 @@
 - 实现 transcribe_audio
 - ASR 调用前触发 Permission
 - transcript 保存
-- 进入 audio-diagnosis Skill
-- ASR 失败时允许用户手动粘贴 transcript fallback
+- 进入 MiMo ASR 转写与文本表达诊断流程
+- ASR 失败时允许用户手动粘贴 transcript 作为产品兜底
 
 **通过标准：** 支持格式上传成功。非支持格式拒绝。ASR 前触发确认。deny 后不调用外部服务。approve 后执行 ASR。transcript 诊断完整。
 
@@ -158,8 +149,8 @@
 - Hooks / Budget 已接入 `chat_api`、`diagnose_api` 与工具执行路径，覆盖 `pre_input`、`pre_tool`、`post_tool`、`post_output`、预算记录与输出检查。
 - 音频 ASR 已改为上传后先保存临时文件、再请求转写权限；批准前不调用 ASR，拒绝后清理临时文件。
 - Trace / Eval 已覆盖权限、Hook、Budget、Memory 注入等关键工程链路。
-- 配置兼容已增强，测试不再依赖手动设置 `DEBUG=false`。
-- API 已补充兼容 alias，包括 `/api/permissions/*`、`POST /api/tools/search-knowledge`、`/api/reports/export`。
+- 配置兼容已增强，测试不再依赖手动设置系统级 `DEBUG=false`。
+- API 已统一路径，权限使用 `/api/permission/*`。
 
 **本轮验收标准：** API 全量测试、Agent build/test、Web build 通过；中文文件 UTF-8 扫描无乱码；Docker 若本机可用则额外验证 compose。
 
@@ -170,13 +161,13 @@
 - 会话页已支持刷新恢复历史消息、session 状态、progress、latest checkpoint 和 trace id。
 - 诊断流式过程中持续展示 process step、tool call、tool result、permission card 和最终 Markdown 报告。
 - Permission card 已从单纯 approve 改为 `approve -> resume`，确保 `save_memory`、`transcribe_audio`、`export_report` 执行到位。
-- deny 流程会刷新 session 状态，并在 ASR 场景提示手动 transcript fallback。
+- deny 流程会刷新 session 状态，并在 ASR 场景提示手动 transcript 兜底。
 - 音频上传已支持 `approval_required -> approve/resume -> transcript 填入输入框`，拒绝或失败时可手动保存 transcript。
 - Trace id 可打开轻量 Trace Events 面板，便于查看后端 Harness 执行链路。
 - Progress 不再只在 loading 时显示，诊断完成、刷新、等待授权状态下都可查看。
 
 **Phase 11 状态：** 会话列表、聊天页、SSE、process step、tool call、permission card、trace id、Markdown 报告、复制/下载、刷新恢复已补齐。
 
-**Phase 12 状态：** 前端音频上传、ASR 权限确认、approve/resume 转写、deny/ASR 失败手动 transcript fallback 已补齐。
+**Phase 12 状态：** 前端音频上传、ASR 权限确认、approve/resume 转写、deny/ASR 失败手动 transcript 兜底已补齐。
 
 **Phase 13 状态：** Dockerfile 和 docker-compose 配置存在；Docker 需要本机安装 Docker Desktop 后再执行 compose config/build 验证。

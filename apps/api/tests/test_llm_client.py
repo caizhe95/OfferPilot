@@ -1,70 +1,37 @@
-"""Tests for the structured LLM adapter."""
+"""Tests for the strict structured LLM adapter."""
+
+import pytest
 
 from app.core.config import settings
-from app.llm import llm_client
+from app.llm.llm_client import LLMUnavailableError, structured_json_completion
 
 
-def test_structured_completion_uses_mock_without_network(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", True)
-    monkeypatch.setattr(settings, "openai_api_key", "sk-real")
+def test_structured_completion_requires_configured_key(monkeypatch):
+    monkeypatch.setattr(settings, "openai_api_key", "")
 
-    result = llm_client.structured_json_completion(
-        task_name="unit_mock",
-        system_prompt="Return JSON.",
-        user_payload={"input": "x"},
-        fallback_factory=lambda: {"ok": True},
-    )
-
-    assert result.source == "mock"
-    assert result.data == {"ok": True}
+    with pytest.raises(LLMUnavailableError):
+        structured_json_completion(
+            task_name="unit_missing_key",
+            system_prompt="Return JSON only.",
+            user_payload={"input": "x"},
+            validator=lambda data: True,
+        )
 
 
-def test_structured_completion_falls_back_on_invalid_json(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
-    monkeypatch.setattr(settings, "openai_api_key", "sk-real")
-    monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: "not json")
+def test_structured_completion_accepts_real_json(monkeypatch):
+    def fake_call_openai_chat_json(**kwargs):
+        return '{"ok": true}'
 
-    result = llm_client.structured_json_completion(
-        task_name="unit_bad_json",
-        system_prompt="Return JSON.",
-        user_payload={"input": "x"},
-        fallback_factory=lambda: {"fallback": True},
-    )
+    import app.llm.llm_client as llm_client_module
+    monkeypatch.setattr(llm_client_module, "_call_openai_chat_json", fake_call_openai_chat_json)
 
-    assert result.source == "fallback"
-    assert result.data == {"fallback": True}
-    assert result.error
-
-
-def test_structured_completion_falls_back_on_validator_failure(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
-    monkeypatch.setattr(settings, "openai_api_key", "sk-real")
-    monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: '{"ok": false}')
-
-    result = llm_client.structured_json_completion(
-        task_name="unit_bad_schema",
-        system_prompt="Return JSON.",
-        user_payload={"input": "x"},
-        fallback_factory=lambda: {"ok": True},
+    result = structured_json_completion(
+        task_name="unit_real_json",
+        system_prompt="只输出 JSON：{\"ok\": true}。",
+        user_payload={"input": "请返回 ok=true"},
         validator=lambda data: data.get("ok") is True,
-    )
-
-    assert result.source == "fallback"
-    assert result.data == {"ok": True}
-
-
-def test_structured_completion_accepts_valid_json(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
-    monkeypatch.setattr(settings, "openai_api_key", "sk-real")
-    monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: '{"ok": true}')
-
-    result = llm_client.structured_json_completion(
-        task_name="unit_good_json",
-        system_prompt="Return JSON.",
-        user_payload={"input": "x"},
-        fallback_factory=lambda: {"ok": False},
-        validator=lambda data: data.get("ok") is True,
+        temperature=0.0,
     )
 
     assert result.source == "llm"
-    assert result.data == {"ok": True}
+    assert result.data["ok"] is True

@@ -57,8 +57,10 @@ def prepare_tool_runner(
         checked = runner.pre_tool(tool_name, params)
         if trace_id:
             add_trace_event(trace_id, "pre_tool", 0, {"tool_name": tool_name, "budget": runner.budget.get_status()})
+        # Hooks may return the original params object; copy before clearing it.
+        checked_params = dict(checked)
         params.clear()
-        params.update(checked)
+        params.update(checked_params)
         return runner
     except Exception as exc:
         if trace_id:

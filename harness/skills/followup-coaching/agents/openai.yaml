@@ -1,5 +1,0 @@
-model: gpt-4o
-provider: openai
-purpose: followup-coaching
-temperature: 0.5
-max_tokens: 4096

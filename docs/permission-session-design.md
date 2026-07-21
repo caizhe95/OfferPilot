@@ -3,9 +3,10 @@
 ## Session 状态机
 
 ```
-created ──> running ──> completed
-              │    │
-              │    └──> failed
+ready ──> running ──> ready
+             │
+             ├──> waiting_approval ──> ready
+             └──> failed
               │
               └──> waiting_approval ──> running
                     │
@@ -31,7 +32,7 @@ created ──> running ──> completed
 - `created` → `running`：用户提交输入
 - `running` → `waiting_approval`：Agent 请求 medium/high 风险工具
 - `waiting_approval` → `running`：用户 approve
-- `waiting_approval` → `failed`：用户 deny + 无 fallback
+- `waiting_approval` → `failed`：用户 deny
 - `running` → `completed`：Agent 成功完成
 - `running` → `failed`：Agent 执行异常
 - `running` → `paused`：用户暂停
@@ -43,11 +44,9 @@ created ──> running ──> completed
 ```
 input_received
   -> qa_extracted
-  -> skill_selected
   -> permission_checked
   -> knowledge_retrieved
-  -> content_scored
-  -> voice_scored
+  -> diagnosis_evaluated
   -> memory_updated
   -> report_generated
   -> output_checked
@@ -69,7 +68,7 @@ Agent 请求 medium/high 风险工具
     -> 用户选择 approve / deny
     -> 写入 audit_log
     -> approve: Agent 执行工具调用
-    -> deny: Agent 收到拒绝，尝试 fallback
+    -> deny: 当前受限工具流程结束
 ```
 
 ### 风险分级
@@ -99,7 +98,7 @@ critical:  默认拒绝，需用户手动在设置中开启
 4. `audit_log` 记录 `request`
 5. 用户 approve → 回到 `running`，`audit_log` 记录 `approve`
 6. 用户 deny → `audit_log` 记录 `deny`，Agent 收到拒绝信号
-7. Agent 可尝试替代方案（fallback）或结束执行
+7. 当前受限工具流程结束，Session 进入明确失败状态
 
 ## Checkpoint
 
@@ -144,7 +143,8 @@ medium/high 风险工具统一返回：
 
 ## Memory 与音频权限
 
-- `/api/diagnose` 只生成 `memory_candidates` 和 `memory_permission`，不直接写 memory。
+- `run_diagnosis` 只生成 `memory_candidates`，Coach 需要通过高风险 `save_memory` 审批后才写入记忆。
 - `save_memory` 是 high 风险，必须 approve + resume 后才落库。
 - `/api/audio/upload` 会先保存临时音频，再触发 `transcribe_audio` medium 风险审批。
 - 用户 approve + resume 后才调用 ASR；deny 后不会调用外部 ASR，并清理可恢复参数中的临时文件。
+- Memory 只保存同一匿名 Profile 下经批准的白名单摘要；后续会话只读取该 Profile 的记录。

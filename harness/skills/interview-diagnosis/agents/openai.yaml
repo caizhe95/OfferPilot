@@ -1,5 +1,0 @@
-model: gpt-4o
-provider: openai
-purpose: interview-diagnosis
-temperature: 0.3
-max_tokens: 4096

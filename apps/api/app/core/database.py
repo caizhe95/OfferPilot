@@ -7,6 +7,7 @@ from app.core.config import settings
 _SCHEMA_SQL = r"""
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
+    profile_id TEXT,
     status TEXT NOT NULL DEFAULT 'created',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE TABLE IF NOT EXISTS memories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT,
+    profile_id TEXT,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     category TEXT DEFAULT 'general',
@@ -38,16 +40,40 @@ CREATE TABLE IF NOT EXISTS knowledge (
     content TEXT NOT NULL,
     source TEXT DEFAULT '',
     dimension TEXT DEFAULT '',
+    kind TEXT DEFAULT 'interview_qa',
+    category TEXT DEFAULT '',
+    question TEXT DEFAULT '',
+    novice_answer TEXT DEFAULT '',
+    expert_answer TEXT DEFAULT '',
+    exam_points TEXT DEFAULT '[]',
+    common_gaps TEXT DEFAULT '[]',
+    followups TEXT DEFAULT '[]',
+    tags TEXT DEFAULT '[]',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
     title,
-    content,
-    dimension,
+    question,
+    expert_answer,
+    novice_answer,
+    exam_points,
+    common_gaps,
+    tags,
+    category,
     source,
     content=knowledge,
     content_rowid=id
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    knowledge_id INTEGER NOT NULL,
+    embedding_model TEXT NOT NULL,
+    vector_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (knowledge_id) REFERENCES knowledge(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS traces (
@@ -55,8 +81,7 @@ CREATE TABLE IF NOT EXISTS traces (
     session_id TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'running',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS trace_events (
@@ -65,8 +90,7 @@ CREATE TABLE IF NOT EXISTS trace_events (
     event_type TEXT NOT NULL,
     step_index INTEGER,
     data TEXT DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (trace_id) REFERENCES traces(id) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -84,13 +108,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS checkpoints (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
+    trace_id TEXT DEFAULT '',
+    run_kind TEXT DEFAULT '',
     state TEXT NOT NULL,
     progress TEXT DEFAULT '[]',
     messages TEXT DEFAULT '[]',
     knowledge TEXT DEFAULT '[]',
     memory_keys TEXT DEFAULT '[]',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS progress_events (
@@ -98,8 +123,7 @@ CREATE TABLE IF NOT EXISTS progress_events (
     session_id TEXT NOT NULL,
     stage TEXT NOT NULL,
     metadata TEXT DEFAULT '{}',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS diagnosis_reports (
@@ -111,6 +135,7 @@ CREATE TABLE IF NOT EXISTS diagnosis_reports (
     voice_scores TEXT DEFAULT '{}',
     overall_score REAL,
     report_markdown TEXT DEFAULT '',
+    diagnosis_json TEXT DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -125,15 +150,42 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS coach_runs (
+    session_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS approval_requests (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    risk_level TEXT NOT NULL,
+    params TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT DEFAULT '',
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_key ON memories(key);
 CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_memories_profile ON memories(profile_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_embeddings_knowledge ON knowledge_embeddings(knowledge_id, embedding_model);
 CREATE INDEX IF NOT EXISTS idx_traces_session ON traces(session_id);
 CREATE INDEX IF NOT EXISTS idx_trace_events_trace ON trace_events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_session ON audit_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
 CREATE INDEX IF NOT EXISTS idx_progress_events_session ON progress_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_diagnosis_reports_session ON diagnosis_reports(session_id);
+CREATE INDEX IF NOT EXISTS idx_approval_requests_session ON approval_requests(session_id, status);
 """.strip()
 
 
@@ -152,9 +204,94 @@ def init_db() -> None:
     conn = get_db()
     try:
         conn.executescript(_SCHEMA_SQL)
+        _migrate_knowledge_schema(conn)
+        _migrate_diagnosis_reports(conn)
+        _migrate_profile_ownership(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_knowledge_schema(conn: sqlite3.Connection) -> None:
+    """Add first-round knowledge columns and rebuild outdated FTS schema."""
+    rows = conn.execute("PRAGMA table_info(knowledge)").fetchall()
+    existing = {row["name"] for row in rows}
+    columns = {
+        "kind": "TEXT DEFAULT 'interview_qa'",
+        "category": "TEXT DEFAULT ''",
+        "question": "TEXT DEFAULT ''",
+        "novice_answer": "TEXT DEFAULT ''",
+        "expert_answer": "TEXT DEFAULT ''",
+        "exam_points": "TEXT DEFAULT '[]'",
+        "common_gaps": "TEXT DEFAULT '[]'",
+        "followups": "TEXT DEFAULT '[]'",
+        "tags": "TEXT DEFAULT '[]'",
+    }
+    for name, ddl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE knowledge ADD COLUMN {name} {ddl}")
+
+    if "category" not in existing and "dimension" in existing:
+        conn.execute("UPDATE knowledge SET category = COALESCE(NULLIF(dimension, ''), category)")
+
+    fts_rows = conn.execute("PRAGMA table_info(knowledge_fts)").fetchall()
+    fts_columns = {row["name"] for row in fts_rows}
+    required_fts = {
+        "title", "question", "expert_answer", "novice_answer",
+        "exam_points", "common_gaps", "tags", "category", "source",
+    }
+    if fts_columns and not required_fts.issubset(fts_columns):
+        conn.execute("DROP TABLE IF EXISTS knowledge_fts")
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE knowledge_fts USING fts5(
+                title,
+                question,
+                expert_answer,
+                novice_answer,
+                exam_points,
+                common_gaps,
+                tags,
+                category,
+                source,
+                content=knowledge,
+                content_rowid=id
+            )
+            """
+        )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_kind_category ON knowledge(kind, category)")
+
+    checkpoint_rows = conn.execute("PRAGMA table_info(checkpoints)").fetchall()
+    checkpoint_existing = {row["name"] for row in checkpoint_rows}
+    checkpoint_columns = {
+        "trace_id": "TEXT DEFAULT ''",
+        "run_kind": "TEXT DEFAULT ''",
+    }
+    for name, ddl in checkpoint_columns.items():
+        if name not in checkpoint_existing:
+            conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {name} {ddl}")
+
+
+def _migrate_diagnosis_reports(conn: sqlite3.Connection) -> None:
+    """Add structured diagnosis persistence to existing databases."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(diagnosis_reports)").fetchall()}
+    if "diagnosis_json" not in columns:
+        conn.execute("ALTER TABLE diagnosis_reports ADD COLUMN diagnosis_json TEXT DEFAULT '{}'")
+
+
+def _migrate_profile_ownership(conn: sqlite3.Connection) -> None:
+    """Add anonymous profile ownership without assigning old records."""
+    session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    if "profile_id" not in session_columns:
+        conn.execute("ALTER TABLE sessions ADD COLUMN profile_id TEXT")
+
+    memory_columns = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+    if "profile_id" not in memory_columns:
+        conn.execute("ALTER TABLE memories ADD COLUMN profile_id TEXT")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_profile ON memories(profile_id, created_at)")
 
 
 def get_table_names() -> list[str]:

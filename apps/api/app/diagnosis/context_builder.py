@@ -1,159 +1,107 @@
-"""Context builder: assembles multi-layer context for the Agent.
+"""Context builder for the fixed single-question diagnosis workflow."""
 
-Context layers (in order of priority):
-1. System Prompt
-2. Global Rules
-3. Triggered Skill + References
-4. Recent Messages (N messages window)
-5. Memory Summary
-6. Retrieved Knowledge
-7. Current Input
-"""
-
-from app.harness.harness import load_rules_for_skill
-from app.skills.skills_loader import load_skill, load_skill_references
-from app.session.session import get_recent_messages
 from app.diagnosis.diagnosis import get_memories
+from app.harness.harness import load_diagnosis_rules
+from app.session.session import get_recent_messages
 
 
 def build_context(
     session_id: str,
+    profile_id: str,
     user_input: str,
-    skill_name: str,
     knowledge_results: list[dict] | None = None,
     max_chars: int = 8000,
     recent_n: int = 10,
 ) -> str:
-    """Build a multi-layer context string for the Agent.
+    """Assemble the instruction actually sent to the one diagnosis call."""
+    layers: list[tuple[str, str]] = [
+        ("system", _build_system_prompt()),
+        ("rules", load_diagnosis_rules()),
+    ]
 
-    Args:
-        session_id: Current session ID
-        user_input: Current user message
-        skill_name: Matched skill name
-        knowledge_results: FTS5 search results
-        max_chars: Maximum context length in characters
-        recent_n: Number of recent messages to include
-
-    Returns:
-        Assembled context string with layers separated by markers.
-    """
-    layers = []
-
-    # Layer 1: System Prompt
-    system_prompt = _build_system_prompt(skill_name)
-    layers.append(("system", system_prompt))
-
-    # Layer 2: Global + Skill Rules
-    rules = load_rules_for_skill(skill_name)
-    if rules:
-        layers.append(("rules", rules))
-
-    # Layer 3: Skill body + references
-    skill_body = _build_skill_context(skill_name)
-    if skill_body:
-        layers.append(("skill", skill_body))
-
-    # Layer 4: Recent Messages
-    recent = get_recent_messages(session_id, n=recent_n)
-    if recent:
-        msgs_text = "\n".join(f"[{m['role']}]: {m['content']}" for m in recent)
-        layers.append(("history", msgs_text))
-
-    # Layer 5: Memory Summary
-    memory = _build_memory_context(session_id)
+    memory = _build_memory_context(profile_id)
     if memory:
         layers.append(("memory", memory))
 
-    # Layer 6: Retrieved Knowledge
-    if knowledge_results:
-        knowledge_text = _format_knowledge(knowledge_results)
-        layers.append(("knowledge", knowledge_text))
+    recent = get_recent_messages(session_id, n=recent_n)
+    if recent:
+        layers.append(("history", "\n".join(f"[{m['role']}]: {m['content']}" for m in recent)))
 
-    # Layer 7: Current Input
+    if knowledge_results:
+        layers.append(("knowledge", _format_knowledge(knowledge_results)))
     layers.append(("input", user_input))
 
-    # Assemble with layer markers
-    context_parts = []
+    parts: list[str] = []
     total_chars = 0
-    for layer_name, layer_content in layers:
-        header = f"\n<!-- {layer_name.upper()} -->\n"
-        content = layer_content
-        if total_chars + len(header) + len(content) > max_chars:
-            remaining = max_chars - total_chars - len(header)
-            if remaining > 100:
-                content = content[:remaining] + "\n...(truncated)"
-            else:
-                break
-        context_parts.append(header + content)
+    for name, content in layers:
+        if not content:
+            continue
+        header = f"\n<!-- {name.upper()} -->\n"
+        remaining = max_chars - total_chars - len(header)
+        if remaining <= 100:
+            break
+        if len(content) > remaining:
+            content = content[:remaining] + "\n...(truncated)"
+        parts.append(header + content)
         total_chars += len(header) + len(content)
 
-    return "\n".join(context_parts)
+    assembled = "\n".join(parts)
+    input_marker = f"\n<!-- INPUT -->\n{user_input}"
+    if user_input not in assembled:
+        assembled = assembled[: max(0, max_chars - len(input_marker))] + input_marker
+    return assembled
 
 
-def _build_system_prompt(skill_name: str) -> str:
-    """Build the system prompt for a given skill."""
-    skill = load_skill(skill_name)
-    skill_desc = skill["description"] if skill else "AI Agent / LLM engineering interview diagnosis"
+def _build_system_prompt() -> str:
+    return """You are an expert Chinese AI Agent / LLM engineering interview evaluator.
 
-    return f"""You are an expert in {skill_desc}.
-
-Your task is to help diagnose and improve interview answers for AI Agent / LLM engineering positions.
+你不是知识库问答助手。
+你的任务仅限于处理“面试题 + 候选人回答”的诊断，不处理开放域知识问答。
+Reference Answers 只用于对标候选人回答，不用于回答知识问题。
 
 Guidelines:
 - Be specific and actionable in your feedback.
-- Follow the output contract specified in the skill references.
+- Follow the supplied diagnosis rules and structured output contract.
 - Do not invent sources or claim knowledge not in the provided knowledge base.
 - Always output in Chinese (Simplified).
 - Keep responses under 2500 characters."""
 
 
-def _build_skill_context(skill_name: str) -> str:
-    """Build skill body + references context."""
-    skill = load_skill(skill_name)
-    if not skill:
+def _build_memory_context(profile_id: str) -> str:
+    """Build a bounded summary from approved memories of one profile."""
+    weaknesses = get_memories(profile_id=profile_id, key="weakness")
+    strengths = get_memories(profile_id=profile_id, key="strength")
+    target_roles = get_memories(profile_id=profile_id, key="target_role")
+    preferences = get_memories(profile_id=profile_id, key="preference")
+    if not weaknesses and not strengths and not target_roles and not preferences:
         return ""
 
-    parts = [f"# Skill: {skill['name']}\n{skill['body']}"]
-
-    refs = load_skill_references(skill_name)
-    for ref in refs:
-        parts.append(f"\n## Reference: {ref['name']}\n{ref['content']}")
-
-    return "\n".join(parts)
-
-
-def _build_memory_context(session_id: str) -> str:
-    """Build memory summary from stored memories, scoped to session."""
-    memories = get_memories(session_id=session_id, key="weakness")
-    if not memories:
-        return ""
-
-    parts = ["## Previous Session Insights"]
-    for m in memories[:5]:  # Limit to 5
-        parts.append(f"- [{m['category']}] {m['key']}: {m['value']}")
-
-    # Also get strengths
-    strengths = get_memories(session_id=session_id, key="strength")
-    if strengths:
-        parts.append("\n## Strengths")
-        for s in strengths[:3]:
-            parts.append(f"- {s['value']}")
-
-    summary = "\n".join(parts)
-    if len(summary) > 800:
-        summary = summary[:800] + "\n...(memory truncated)"
-    return summary
+    parts = ["## Approved Practice Memory"]
+    for item in weaknesses[:5]:
+        parts.append(f"- [weakness] {item['value']}")
+    for item in strengths[:3]:
+        parts.append(f"- [strength] {item['value']}")
+    for item in target_roles[:3]:
+        parts.append(f"- [target role] {item['value']}")
+    for item in preferences[:3]:
+        parts.append(f"- [preference] {item['value']}")
+    return "\n".join(parts)[:800]
 
 
 def _format_knowledge(results: list[dict]) -> str:
-    """Format knowledge search results for context."""
-    parts = ["## Retrieved Knowledge"]
-    for i, r in enumerate(results[:5]):
-        parts.append(f"### [{i + 1}] {r['title']} (dimension: {r['dimension']}, score: {r['score']})")
-        # Truncate long content
-        content = r["content"]
-        if len(content) > 800:
-            content = content[:800] + "..."
-        parts.append(content)
+    """Format fused interview references as evidence, not QA material."""
+    refs = [r for r in results[:5] if r.get("kind") == "interview_qa"]
+    coaching = [r for r in results[:5] if r.get("kind") == "coaching_doc"]
+    parts = ["## Reference Answers"]
+    for index, item in enumerate(refs, 1):
+        parts.append(f"### {index}. {item.get('title', '')}")
+        parts.append(f"Question: {item.get('question', '')}")
+        expert = str(item.get("expert_answer") or item.get("content") or "")
+        parts.append(f"Expert Answer:\n{expert[:900]}")
+        points = item.get("exam_points") or []
+        if points:
+            parts.append("Exam Points:\n" + "\n".join(f"- {point}" for point in points[:6]))
+        parts.append(f"Source: {item.get('source', '')}")
+    for index, item in enumerate(coaching[:2], 1):
+        parts.append(f"### Coaching Note {index}: {item.get('title', '')}\n{str(item.get('content', ''))[:700]}")
     return "\n\n".join(parts)
-

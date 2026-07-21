@@ -1,19 +1,21 @@
 """Session state machine and management.
 
-Handles session lifecycle: created → running → waiting_approval/paused → completed/failed/cancelled.
+Handles persistent Coach session lifecycle: ready → running → ready/waiting_approval.
 """
 
 import uuid
 import json
+import sqlite3
 from datetime import datetime, timezone
 from app.core.database import get_db
 
 
 # Valid state transitions
 VALID_TRANSITIONS: dict[str, set[str]] = {
-    "created": {"running", "cancelled"},
-    "running": {"waiting_approval", "paused", "completed", "failed", "cancelled"},
-    "waiting_approval": {"running", "failed", "cancelled"},
+    "ready": {"running", "cancelled"},
+    "running": {"ready", "waiting_approval", "failed", "cancelled"},
+    "waiting_approval": {"running", "ready", "failed", "cancelled"},
+    "created": {"running", "cancelled"},  # legacy records are read-only
     "paused": {"running", "cancelled"},
     "completed": set(),      # terminal
     "failed": set(),         # terminal
@@ -21,10 +23,11 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 }
 
 VALID_STATUSES = set(VALID_TRANSITIONS.keys())
+DEFAULT_LOCAL_PROFILE_ID = "00000000-0000-4000-8000-000000000001"
 
 
-def create_session(metadata: dict | None = None) -> dict:
-    """Create a new session in 'created' state."""
+def create_session(profile_id: str = DEFAULT_LOCAL_PROFILE_ID, metadata: dict | None = None) -> dict:
+    """Create a new persistent Coach session in 'ready' state."""
     conn = get_db()
     try:
         session_id = str(uuid.uuid4())
@@ -32,13 +35,14 @@ def create_session(metadata: dict | None = None) -> dict:
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
 
         conn.execute(
-            "INSERT INTO sessions (id, status, created_at, updated_at, metadata) VALUES (?, ?, ?, ?, ?)",
-            (session_id, "created", now, now, meta_json),
+            "INSERT INTO sessions (id, profile_id, status, created_at, updated_at, metadata) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, profile_id, "ready", now, now, meta_json),
         )
         conn.commit()
         return {
             "id": session_id,
-            "status": "created",
+            "profile_id": profile_id,
+            "status": "ready",
             "created_at": now,
             "updated_at": now,
             "metadata": metadata or {},
@@ -52,13 +56,14 @@ def get_session(session_id: str) -> dict | None:
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT id, status, created_at, updated_at, metadata FROM sessions WHERE id = ?",
+            "SELECT id, profile_id, status, created_at, updated_at, metadata FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
         if row is None:
             return None
         return {
             "id": row["id"],
+            "profile_id": row["profile_id"] if "profile_id" in row.keys() else None,
             "status": row["status"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
@@ -80,7 +85,7 @@ def transition_session(session_id: str, new_status: str) -> dict | None:
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT id, status, created_at, metadata FROM sessions WHERE id = ?",
+            "SELECT id, profile_id, status, created_at, metadata FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
 
@@ -102,6 +107,7 @@ def transition_session(session_id: str, new_status: str) -> dict | None:
 
         return {
             "id": session_id,
+            "profile_id": row["profile_id"] if "profile_id" in row.keys() else None,
             "status": new_status,
             "created_at": row["created_at"],
             "updated_at": now,
@@ -126,7 +132,7 @@ def mark_waiting_approval(
         return session
     if status in {"completed", "failed", "cancelled"}:
         raise ValueError(f"Cannot wait for approval from terminal state: {status}")
-    if status == "created":
+    if status in {"created", "ready"}:
         transition_session(session_id, "running")
 
     updated = transition_session(session_id, "waiting_approval")
@@ -146,7 +152,7 @@ def resume_after_approval(session_id: str) -> dict | None:
     if session is None:
         return None
     if session["status"] == "waiting_approval":
-        return transition_session(session_id, "running")
+        return transition_session(session_id, "ready")
     return session
 
 
@@ -209,9 +215,9 @@ def get_recent_messages(session_id: str, n: int = 10) -> list[dict]:
 def add_progress_event(session_id: str, stage: str, metadata: dict | None = None) -> dict:
     """Record a progress event."""
     valid_stages = {
-        "input_received", "qa_extracted", "skill_selected",
-        "permission_checked", "knowledge_retrieved", "content_scored",
-        "voice_scored", "memory_updated", "report_generated",
+        "input_received", "qa_extracted",
+        "permission_checked", "knowledge_retrieved", "diagnosis_evaluated",
+        "memory_updated", "report_generated",
         "output_checked", "completed",
     }
     if stage not in valid_stages:
@@ -267,19 +273,23 @@ def save_checkpoint(
     messages: list[dict] | None = None,
     knowledge: list[str] | None = None,
     memory_keys: list[str] | None = None,
+    trace_id: str = "",
+    run_kind: str = "",
 ) -> dict:
-    """Save a checkpoint for a session."""
+    """Save a checkpoint for a session with run attribution."""
     checkpoint_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
 
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO checkpoints (id, session_id, state, progress, messages, knowledge, memory_keys, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO checkpoints (id, session_id, trace_id, run_kind, state, progress, messages, knowledge, memory_keys, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 checkpoint_id,
                 session_id,
+                trace_id,
+                run_kind,
                 json.dumps(state, ensure_ascii=False),
                 json.dumps(progress or [], ensure_ascii=False),
                 json.dumps(messages or [], ensure_ascii=False),
@@ -292,6 +302,8 @@ def save_checkpoint(
         return {
             "id": checkpoint_id,
             "session_id": session_id,
+            "trace_id": trace_id,
+            "run_kind": run_kind,
             "state": state,
             "progress": progress or [],
             "messages": messages or [],
@@ -313,16 +325,7 @@ def get_checkpoint(checkpoint_id: str) -> dict | None:
         ).fetchone()
         if row is None:
             return None
-        return {
-            "id": row["id"],
-            "session_id": row["session_id"],
-            "state": json.loads(row["state"]),
-            "progress": json.loads(row["progress"]),
-            "messages": json.loads(row["messages"]),
-            "knowledge": json.loads(row["knowledge"]),
-            "memory_keys": json.loads(row["memory_keys"]),
-            "created_at": row["created_at"],
-        }
+        return _row_to_checkpoint(row)
     finally:
         conn.close()
 
@@ -337,40 +340,51 @@ def get_latest_checkpoint(session_id: str) -> dict | None:
         ).fetchone()
         if row is None:
             return None
-        return {
-            "id": row["id"],
-            "session_id": row["session_id"],
-            "state": json.loads(row["state"]),
-            "progress": json.loads(row["progress"]),
-            "messages": json.loads(row["messages"]),
-            "knowledge": json.loads(row["knowledge"]),
-            "memory_keys": json.loads(row["memory_keys"]),
-            "created_at": row["created_at"],
-        }
+        return _row_to_checkpoint(row)
     finally:
         conn.close()
 
 
-def list_sessions(status: str | None = None, limit: int = 20) -> list[dict]:
+def _row_to_checkpoint(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "session_id": row["session_id"],
+        "trace_id": row["trace_id"] if "trace_id" in row.keys() else "",
+        "run_kind": row["run_kind"] if "run_kind" in row.keys() else "",
+        "state": json.loads(row["state"]),
+        "progress": json.loads(row["progress"]),
+        "messages": json.loads(row["messages"]),
+        "knowledge": json.loads(row["knowledge"]),
+        "memory_keys": json.loads(row["memory_keys"]),
+        "created_at": row["created_at"],
+    }
+
+
+def list_sessions(
+    profile_id: str = DEFAULT_LOCAL_PROFILE_ID,
+    status: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
     """List sessions, optionally filtered by status."""
     limit = max(1, min(limit, 100))
     conn = get_db()
     try:
         if status:
             rows = conn.execute(
-                "SELECT id, status, created_at, updated_at, metadata FROM sessions "
-                "WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
+                "SELECT id, profile_id, status, created_at, updated_at, metadata FROM sessions "
+                "WHERE profile_id = ? AND status = ? ORDER BY created_at DESC LIMIT ?",
+                (profile_id, status, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, status, created_at, updated_at, metadata FROM sessions "
-                "ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                "SELECT id, profile_id, status, created_at, updated_at, metadata FROM sessions "
+                "WHERE profile_id = ? ORDER BY created_at DESC LIMIT ?",
+                (profile_id, limit),
             ).fetchall()
         return [
             {
                 "id": row["id"],
+                "profile_id": row["profile_id"] if "profile_id" in row.keys() else None,
                 "status": row["status"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],

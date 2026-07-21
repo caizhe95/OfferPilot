@@ -3,7 +3,7 @@
 import pytest
 from app.harness.harness import (
     load_rules,
-    load_rules_for_skill,
+    load_diagnosis_rules,
     HookPoint,
     HookContext,
     HookManager,
@@ -11,7 +11,6 @@ from app.harness.harness import (
     BudgetConfig,
     BudgetTracker,
     check_output,
-    generate_fallback_report,
 )
 
 
@@ -25,20 +24,11 @@ class TestRulesLoader:
         assert "audio" in rules
         assert len(rules["global"]) > 50
 
-    def test_load_rules_for_diagnosis_skill(self):
-        rules = load_rules_for_skill("interview-diagnosis")
+    def test_load_fixed_diagnosis_rules(self):
+        rules = load_diagnosis_rules()
         assert "Global Rules" in rules or "诊断" in rules
         # Should include global + diagnosis
         assert "Scoring" in rules or "评分" in rules
-
-    def test_load_rules_for_audio_skill(self):
-        rules = load_rules_for_skill("audio-diagnosis")
-        assert "Audio" in rules or "音频" in rules
-
-    def test_load_rules_for_unknown_skill(self):
-        rules = load_rules_for_skill("unknown")
-        # Should still include global rules
-        assert len(rules) > 0
 
 
 class TestHookManager:
@@ -175,16 +165,3 @@ answer_pacing: 7/10
         result = check_output(output)
         assert not result["valid"]
 
-
-class TestFallbackReport:
-    """Tests for fallback report generation."""
-
-    def test_generates_report(self):
-        report = generate_fallback_report("什么是ReAct？", "ReAct就是Reasoning加Acting...")
-        assert "面试诊断报告" in report
-        assert "什么是ReAct？" in report
-        assert "fallback" in report.lower()
-
-    def test_handles_empty_input(self):
-        report = generate_fallback_report()
-        assert "未提供" in report

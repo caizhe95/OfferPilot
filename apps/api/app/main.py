@@ -16,15 +16,10 @@ from app.core.errors import (
 from app.knowledge.knowledge_importer import ensure_knowledge_loaded
 
 from app.audio.audio_api import router as audio_router
-from app.chat.chat_api import router as chat_router
-from app.diagnosis.diagnose_api import router as diagnose_router
-from app.knowledge.knowledge_api import router as knowledge_router
-from app.permission.permission_api import alias_router as permission_alias_router
-from app.permission.permission_api import router as permission_router
-from app.reports.reports_api import router as reports_router
+from app.coaching.coaching_api import router as coaching_router
+from app.knowledge.knowledge_api import router as knowledge_router, admin_router as knowledge_admin_router
+from app.permission.permission_api import router as permission_router, tool_router as permission_tool_router
 from app.session.session_api import router as session_router
-from app.skills.skills_api import router as skills_router
-from app.tools.tools_api import router as tools_api_router
 from app.trace.trace_eval_api import router as trace_eval_router
 
 
@@ -72,13 +67,10 @@ async def health_check():
 
 # Register routers
 app.include_router(knowledge_router)
+app.include_router(knowledge_admin_router)
 app.include_router(session_router)
 app.include_router(permission_router)
-app.include_router(permission_alias_router)
-app.include_router(skills_router)
 app.include_router(trace_eval_router)
 app.include_router(audio_router)
-app.include_router(chat_router)
-app.include_router(diagnose_router)
-app.include_router(tools_api_router)
-app.include_router(reports_router)
+app.include_router(coaching_router)
+app.include_router(permission_tool_router)

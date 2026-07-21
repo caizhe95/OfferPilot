@@ -21,9 +21,11 @@ class RiskLevel(str, Enum):
 # Tool registry with risk levels
 TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "search_knowledge": RiskLevel.LOW,
-    "score_answer": RiskLevel.LOW,
-    "analyze_voice_text": RiskLevel.LOW,
-    "generate_followup": RiskLevel.LOW,
+    "get_practice_profile": RiskLevel.LOW,
+    "list_recent_reports": RiskLevel.LOW,
+    "recommend_next_question": RiskLevel.LOW,
+    "run_diagnosis": RiskLevel.LOW,
+    "diagnose_interview": RiskLevel.LOW,
     "transcribe_audio": RiskLevel.MEDIUM,
     "save_memory": RiskLevel.HIGH,
     "export_report": RiskLevel.HIGH,

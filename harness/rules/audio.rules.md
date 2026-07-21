@@ -6,22 +6,13 @@
 - On ASR denial, prompt user to paste a transcript manually.
 - Save the transcript to the session.
 
-## Transcript Voice Scoring
-- Score voice dimensions from transcript text patterns.
-- Mark all voice scores with (*) when based on text analysis.
-- Look for:
+## Transcript Expression Scoring
+- 语音维度只依据 ASR 转写文本和程序化文本特征，不代表声学评测。
+- 可观察：
   - Chinese filler words: 嗯, 呃, 啊, 就是, 那个, 然后(overuse), 对吧
   - Sentence completion patterns
   - Topic transition quality
   - Repetition density
-
-## Audio-Specific (Phase 12+)
-- When real audio is available, use acoustic features:
-  - Speech rate (words per minute)
-  - Pause duration and frequency
-  - Silence ratio
-  - Pitch variation
-- Combine text-based and acoustic scores for final voice dimension.
 
 ## Fallback
 - If ASR fails, allow manual transcript input.

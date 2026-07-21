@@ -2,79 +2,71 @@
 
 ## 服务拓扑
 
-```
+```text
 ┌─────────────────────────────────────────────┐
-│                   Web UI                     │
-│              (Next.js / React)               │
+│                   Web UI                    │
+│              Next.js / React                │
 └──────────────────┬──────────────────────────┘
                    │ HTTP + SSE
                    ▼
 ┌─────────────────────────────────────────────┐
-│              FastAPI Backend                 │
-│                                              │
+│              FastAPI Backend                │
+│                                             │
+│  ┌──────────────────────────────────────┐   │
+│  │        Python Agent Loop              │   │
+│  │  Tool Registry / Harness / Budget     │   │
+│  │  Output Checker / Trace Events        │   │
+│  └──────────────────────────────────────┘   │
+│                                             │
 │  ┌──────────┐  ┌───────────┐  ┌──────────┐ │
 │  │ Session  │  │ Permission│  │ Memory   │ │
-│  ├──────────┤  ├───────────┤  ├──────────┤ │
-│  │ Progress │  │ Approval  │  │ Trace    │ │
-│  ├──────────┤  ├───────────┤  ├──────────┤ │
-│  │Checkpoint│  │ Audit     │  │ Eval     │ │
+│  │ Progress │  │ Audit     │  │ Eval     │ │
+│  │Checkpoint│  │ Approval  │  │ Trace    │ │
 │  └──────────┘  └───────────┘  └──────────┘ │
-│                                              │
+│                                             │
 │  ┌──────────────────────────────────────┐   │
-│  │         SQLite / FTS5                 │   │
+│  │       SQLite / FTS5 / Embedding       │   │
 │  └──────────────────────────────────────┘   │
-└──────────────────┬──────────────────────────┘
-                   │ HTTP + SSE
-                   ▼
-┌─────────────────────────────────────────────┐
-│          pi-mono Agent Service               │
-│                                              │
-│  ┌───────┐ ┌────────┐ ┌───────┐ ┌───────┐  │
-│  │ Rules │ │ Skills │ │ Tools │ │ Hooks │  │
-│  ├───────┤ ├────────┤ ├───────┤ ├───────┤  │
-│  │Budget │ │ Output │ │Context │ │Memory │  │
-│  │       │ │Checker │ │Builder │ │       │  │
-│  └───────┘ └────────┘ └───────┘ └───────┘  │
 └─────────────────────────────────────────────┘
 ```
 
 ## 目录结构
 
-```
+```text
 lite-offerpilot/
   apps/
-    api/              FastAPI 后端
-    agent-ts/         pi-mono 单 Agent 服务
+    api/              FastAPI 后端与 Python Agent Loop
     web/              Web UI
 
   harness/
     rules/            全局和行为约束规则
-    skills/           可迁移的 AI Skills
 
-  knowledge/
-    selected/         精选的知识库 Markdown
-
+  knowledge/          题库型 Markdown 知识库
   docs/               架构和设计文档
 ```
 
 ## 数据流
 
-1. 用户在 Web UI 输入面试题和回答
-2. FastAPI 创建 Session，进入 `input_received` 阶段
-3. FastAPI 调用 Agent Service `/agent/run`
-4. Agent 加载 Rules、匹配 Skill、调用 Tools
-5. 涉及 medium/high 风险工具时，PermissionGate 拦截
-6. 状态变更为 `waiting_approval`，Web UI 展示确认卡片
-7. 用户 approve / deny，Agent 继续或 fallback
-8. Agent 输出最终诊断报告
-9. 报告保存到 SQLite，通过 SSE 流式返回 Web UI
+1. 用户在 Web UI 输入面试题和回答。
+2. FastAPI 创建 Session，记录 `input_received` 和 `qa_extracted`。
+3. Python Agent Loop 执行固定单题诊断工具计划。
+4. `search_knowledge` 同时执行 FTS5 与向量检索，使用 RRF 合并参考题。
+5. Context 的固定规则、同一 Profile 已审批记忆和检索证据进入一次 `diagnose_interview` 结构化模型调用。
+6. Python 校验考点证据、计算总分、渲染固定报告并保存结构化结果。
+7. 如存在 memory candidate，返回 `permission_required` 卡片，但不绕过用户确认写入。
+8. Trace、progress、checkpoint 和 SSE 事件同步返回给前端。
+
+## 匿名 Profile
+
+Web 首次访问生成 UUID 并保存在浏览器本地存储。会话、音频、报告、审批和 trace 请求通过 `X-OfferPilot-Profile-Id` 绑定到该 Profile。它用于匿名隔离与跨会话记忆，不是账户认证。
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
 | 后端 | Python 3.11+, FastAPI, SQLite, FTS5 |
-| Agent | TypeScript, pi-mono |
+| Agent Runtime | Python hand-written loop |
+| 模型接口 | OpenAI-compatible Text / Embedding，MiMo ASR |
 | 前端 | Next.js, React, TailwindCSS |
 | 部署 | Docker, Docker Compose |
 
@@ -84,4 +76,5 @@ lite-offerpilot/
 - 模拟面试流程
 - TTS（文字转语音）
 - JD / 简历解析
-- 向量数据库（第一版使用 FTS5）
+- 开放域知识库问答
+- 独立向量数据库（当前使用 SQLite 中的 JSON 向量与内存余弦计算）

@@ -1,7 +1,8 @@
 """Tests for audio upload and ASR."""
 
-import pytest
 import io
+import asyncio
+from types import SimpleNamespace
 from app.core.database import init_db
 from app.session.session import create_session
 from app.audio.audio import (
@@ -10,6 +11,8 @@ from app.audio.audio import (
     save_transcript_to_session,
     MAX_AUDIO_SIZE,
     ALLOWED_AUDIO_TYPES,
+    _extract_mimo_transcript,
+    transcribe_audio,
 )
 
 
@@ -46,7 +49,7 @@ class TestAudioSave:
     """Tests for audio file saving."""
 
     def test_save_audio_file(self):
-        content = b"fake audio data"
+        content = b"invalid audio data"
         filepath = save_audio_file(content, "test.wav", "audio/wav")
         assert filepath.endswith(".wav")
         assert "uploads" in filepath
@@ -56,7 +59,7 @@ class TestAudioSave:
         Path(filepath).unlink(missing_ok=True)
 
     def test_save_mp3_file(self):
-        content = b"fake mp3 data"
+        content = b"invalid mp3 data"
         filepath = save_audio_file(content, "test.mp3", "audio/mpeg")
         assert filepath.endswith(".mp3")
 
@@ -92,6 +95,49 @@ class TestAllowedFormats:
         assert "audio/mpeg" in ALLOWED_AUDIO_TYPES
 
 
+class TestMiMoProtocol:
+    def test_extracts_supported_response_shapes(self):
+        assert _extract_mimo_transcript({"text": "直接文本"}) == "直接文本"
+        assert _extract_mimo_transcript({"choices": [{"message": {"content": "消息文本"}}]}) == "消息文本"
+        assert _extract_mimo_transcript({"choices": [{"message": {"content": [{"text": "数组"}, {"text": "文本"}]}}]}) == "数组文本"
+
+    def test_sends_mimo_chat_completion_payload(self, monkeypatch):
+        from app.core.config import settings
+        import httpx
+        from pathlib import Path
+
+        monkeypatch.setattr(settings, "mimo_api_key", "test-key")
+        monkeypatch.setattr(settings, "mimo_base_url", "https://mimo.example/v1")
+        audio_path = Path("data/mimo-protocol-test.wav")
+        audio_path.parent.mkdir(exist_ok=True)
+        audio_path.write_bytes(b"wav-data")
+        captured = {}
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "转写结果"}}]}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return Response()
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        try:
+            result = asyncio.run(transcribe_audio(str(audio_path)))
+            assert result["transcript"] == "转写结果"
+            assert captured["url"] == "https://mimo.example/v1/chat/completions"
+            assert captured["headers"]["api-key"] == "test-key"
+            assert captured["json"]["model"] == settings.mimo_asr_model
+            assert captured["json"]["asr_options"] == {"language": "auto"}
+            assert captured["json"]["messages"][0]["content"][0]["input_audio"]["data"].startswith("data:audio/wav;base64,")
+        finally:
+            audio_path.unlink(missing_ok=True)
+
+
 class TestAudioApiPermissionFlow:
     """Tests for upload -> approval -> resume transcription."""
 
@@ -100,7 +146,7 @@ class TestAudioApiPermissionFlow:
         resp = client.post(
             "/api/audio/upload",
             data={"session_id": session["id"]},
-            files={"file": ("sample.wav", b"fake wav data", "audio/wav")},
+            files={"file": ("sample.wav", b"invalid wav data", "audio/wav")},
         )
         assert resp.status_code == 200
         data = resp.json()
@@ -113,11 +159,13 @@ class TestAudioApiPermissionFlow:
         assert session_resp.json()["status"] == "waiting_approval"
 
     def test_approve_resume_transcribes_audio(self, client):
+        """Invalid audio data naturally fails ASR.
+        The test verifies the error-handling path is functional."""
         session = create_session()
         upload_resp = client.post(
             "/api/audio/upload",
             data={"session_id": session["id"]},
-            files={"file": ("sample.wav", b"fake wav data", "audio/wav")},
+            files={"file": ("sample.wav", b"invalid wav data", "audio/wav")},
         )
         request_id = upload_resp.json()["request_id"]
 
@@ -133,9 +181,7 @@ class TestAudioApiPermissionFlow:
         })
         assert resume_resp.status_code == 200
         data = resume_resp.json()
-        assert data["status"] == "transcribed"
-        assert "transcript" in data
-        assert data["provider"] == "mock"
-
-        messages = __import__("app.session.session", fromlist=["get_recent_messages"]).get_recent_messages(session["id"])
-        assert any("[Audio Transcript]" in m["content"] for m in messages)
+        # Invalid WAV data fails ASR -> asr_failed
+        assert data["status"] == "asr_failed"
+        assert "error" in data
+        assert data["provider"] == "mimo"

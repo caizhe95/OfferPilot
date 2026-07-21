@@ -17,9 +17,7 @@ class TestRiskClassification:
 
     def test_low_risk_tools(self):
         assert get_tool_risk("search_knowledge") == RiskLevel.LOW
-        assert get_tool_risk("score_answer") == RiskLevel.LOW
-        assert get_tool_risk("analyze_voice_text") == RiskLevel.LOW
-        assert get_tool_risk("generate_followup") == RiskLevel.LOW
+        assert get_tool_risk("diagnose_interview") == RiskLevel.LOW
 
     def test_medium_risk_tools(self):
         assert get_tool_risk("transcribe_audio") == RiskLevel.MEDIUM
@@ -190,7 +188,9 @@ from app.session.session import create_session
 def perm_client():
     """Test client with clean DB."""
     init_db()
-    return TestClient(app)
+    client = TestClient(app)
+    client.headers.update({"X-OfferPilot-Profile-Id": "00000000-0000-4000-8000-000000000001"})
+    return client
 
 
 class TestResumeFlow:
@@ -260,7 +260,7 @@ class TestResumeFlow:
 
         session_resp = perm_client.get(f"/api/sessions/{session_id}")
         assert session_resp.status_code == 200
-        assert session_resp.json()["status"] == "running"
+        assert session_resp.json()["status"] == "ready"
 
     def test_resume_without_approve_fails(self, perm_client):
         """Resume without prior approve should fail."""

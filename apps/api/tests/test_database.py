@@ -53,7 +53,17 @@ def test_sessions_table_schema():
     try:
         info = conn.execute("PRAGMA table_info(sessions)").fetchall()
         columns = {row["name"] for row in info}
-        assert {"id", "status", "created_at", "updated_at", "metadata"}.issubset(columns)
+        assert {"id", "profile_id", "status", "created_at", "updated_at", "metadata"}.issubset(columns)
+    finally:
+        conn.close()
+
+
+def test_memories_table_has_profile_ownership_column():
+    init_db()
+    conn = get_db()
+    try:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        assert "profile_id" in columns
     finally:
         conn.close()
 

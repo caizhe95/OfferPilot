@@ -1,6 +1,6 @@
 """Audio upload and ASR API endpoints."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from app.audio.audio import (
     validate_audio,
     save_audio_file,
@@ -9,6 +9,8 @@ from app.audio.audio import (
 )
 from app.core.api_helpers import permission_required_response
 from app.permission.permission import permission_gate, write_audit_log
+from app.core.profile import require_owned_session, require_profile_id
+from app.session.session import get_session
 
 router = APIRouter(prefix="/api/audio", tags=["audio"])
 
@@ -17,12 +19,14 @@ router = APIRouter(prefix="/api/audio", tags=["audio"])
 async def upload_audio(
     session_id: str = Form(...),
     file: UploadFile = File(...),
+    profile_id: str = Depends(require_profile_id),
 ):
     """Upload an audio file for transcription.
 
     File must be wav or mp3 format, max 25MB.
     Requires permission approval for ASR (medium risk).
     """
+    require_owned_session(get_session(session_id), profile_id)
     # Validate file
     if not file.content_type:
         raise HTTPException(status_code=400, detail="无法识别文件类型")
@@ -90,8 +94,10 @@ async def upload_audio(
 async def manual_transcript(
     session_id: str = Form(...),
     transcript: str = Form(...),
+    profile_id: str = Depends(require_profile_id),
 ):
-    """Submit a manual transcript (fallback when ASR fails or is denied)."""
+    """Submit a manual transcript when ASR fails or is denied."""
+    require_owned_session(get_session(session_id), profile_id)
     if not transcript.strip():
         raise HTTPException(status_code=400, detail="Transcript must not be empty")
 
