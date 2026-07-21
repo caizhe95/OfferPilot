@@ -55,13 +55,12 @@
 - 初始化 apps/agent-ts
 - 接入 pi-mono
 - 实现 OpenAI-compatible provider
-- 实现 MockProvider
 - 注册工具 schema
 - 实现 FastAPI tool client
 - 实现 /agent/run 和 /agent/run-stream
 - 输出标准事件流
 
-**通过标准：** Mock 模式可运行。Agent 可调用 search_knowledge。工具失败返回结构化错误。流式事件包含 tool_call、tool_result、text_delta、done。Vitest 通过。
+**通过标准：** Agent 可调用 search_knowledge。工具失败返回结构化错误。流式事件包含 tool_call、tool_result、text_delta、done。Vitest 通过。
 
 ## Phase 6：Skills 按 skill-creator 规范落地
 
@@ -111,9 +110,9 @@
 - 实现 /api/traces/{trace_id}
 - 编写至少 12 条 eval case
 - 实现 eval runner
-- 支持 mock eval 和真实模型可选 eval
+- 支持 eval 返回结构化结果
 
-**通过标准：** trace 能记录完整链路。eval runner 可运行。失败原因清晰。mock eval 稳定。
+**通过标准：** trace 能记录完整链路。eval runner 可运行。失败原因清晰。
 
 ## Phase 11：Web UI
 

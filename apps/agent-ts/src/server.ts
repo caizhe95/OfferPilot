@@ -4,11 +4,7 @@
  */
 
 import express, { Request, Response } from "express";
-import {
-  type Model,
-  getModel,
-  registerFauxProvider,
-} from "@earendil-works/pi-ai/compat";
+import { type Model, getModel } from "@earendil-works/pi-ai/compat";
 import { Agent } from "./agent";
 import { createToolRegistry } from "./tool-registry";
 import { FastApiToolClient } from "./fastapi-client";
@@ -18,38 +14,12 @@ import type { ToolExecutor } from "./types";
 const PORT = parseInt(process.env.AGENT_PORT || "3001", 10);
 const FASTAPI_URL =
   process.env.FASTAPI_BASE_URL || process.env.FASTAPI_URL || "http://localhost:8000";
-const MOCK_MODE =
-  process.env.MOCK_AGENT === "true" || !process.env.OPENAI_API_KEY;
 
 // ---------------------------------------------------------------------------
 // Model setup
 // ---------------------------------------------------------------------------
 
 function createModel(): Model<any> {
-  if (MOCK_MODE) {
-    // Use pi-ai faux provider for mock mode
-    const faux = registerFauxProvider({
-      api: "faux-completions",
-      provider: "faux",
-      models: [
-        {
-          id: "mock-gpt-4o",
-          name: "Mock GPT-4o",
-          reasoning: false,
-          input: ["text"],
-          contextWindow: 128000,
-          maxTokens: 16384,
-        },
-      ],
-    });
-    const model = faux.getModel("mock-gpt-4o");
-    if (!model) {
-      throw new Error("Failed to create mock model");
-    }
-    return model;
-  }
-
-  // Use pi-ai built-in OpenAI models
   const modelId = process.env.OPENAI_MODEL || "gpt-4o";
   return getModel("openai", modelId as any);
 }
@@ -59,67 +29,6 @@ function createModel(): Model<any> {
 // ---------------------------------------------------------------------------
 
 function buildToolExecutors(): Record<string, ToolExecutor> {
-  if (MOCK_MODE) {
-    return {
-      search_knowledge: async (params) => {
-        return {
-          query: params.query,
-          results: [
-            {
-              title: "Mock Knowledge Result",
-              content: "This is a mock knowledge result for testing.",
-              dimension: "architecture",
-              source: "mock",
-              score: 0.5,
-            },
-          ],
-          total: 1,
-        };
-      },
-      score_answer: async (params) => {
-        return {
-          dimensions: {
-            concept_accuracy: { score: 7, explanation: "Mock concept score" },
-            structure_completeness: { score: 6, explanation: "Mock structure score" },
-            engineering_depth: { score: 5, explanation: "Mock depth score" },
-            example_quality: { score: 4, explanation: "Mock example score" },
-            question_alignment: { score: 7, explanation: "Mock alignment score" },
-          },
-          total: 29,
-          max_total: 50,
-        };
-      },
-      analyze_voice_text: async (params) => {
-        return {
-          dimensions: {
-            fluency: { score: 7, explanation: "Mock fluency" },
-            filler_words: { score: 6, explanation: "Mock filler words" },
-            redundancy: { score: 8, explanation: "Mock redundancy" },
-            spoken_clarity: { score: 7, explanation: "Mock clarity" },
-            answer_pacing: { score: 6, explanation: "Mock pacing" },
-          },
-          total: 34,
-          max_total: 50,
-        };
-      },
-      generate_followup: async (params) => {
-        return {
-          followups: [
-            { question: "Mock followup 1?", why: "Test" },
-            { question: "Mock followup 2?", why: "Test" },
-          ],
-          count: 2,
-        };
-      },
-      save_memory: async (params) => {
-        return { success: true, key: params.key };
-      },
-      export_report: async (params) => {
-        return { id: params.report_id, status: "mock" };
-      },
-    };
-  }
-
   const client = new FastApiToolClient({ baseUrl: FASTAPI_URL });
   return client.getExecutors();
 }
@@ -149,7 +58,6 @@ You can:
 
 Always produce output in Chinese. Keep responses under 2500 characters.`,
     model,
-    mockMode: MOCK_MODE,
   });
 
   // Register tools
@@ -238,7 +146,7 @@ app.post("/agent/run-stream", async (req: Request, res: Response) => {
 
 // Health check
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", mode: MOCK_MODE ? "mock" : "live" });
+  res.json({ status: "ok", mode: "live" });
 });
 
 // List tools
@@ -250,10 +158,8 @@ app.get("/agent/tools", (_req: Request, res: Response) => {
 
 app.listen(PORT, () => {
   console.log(`OfferPilot Agent Service running on port ${PORT}`);
-  console.log(`Mode: ${MOCK_MODE ? "mock" : "live"}`);
-  if (!MOCK_MODE) {
-    console.log(`FastAPI URL: ${FASTAPI_URL}`);
-  }
+  console.log(`Mode: live`);
+  console.log(`FastAPI URL: ${FASTAPI_URL}`);
 });
 
 export default app;

@@ -403,7 +403,7 @@ export default function SessionPage() {
           setAudioFile(null);
           setAudioStatus("transcribed");
           setAudioInfo(
-            `转写完成：${resumeData.provider || "mock"}，${resumeData.transcript.length} 字。可继续诊断。`
+            `转写完成：${resumeData.provider || ""}，${resumeData.transcript.length} 字。可继续诊断。`
           );
         } else {
           setAudioStatus("manual");
@@ -507,7 +507,7 @@ export default function SessionPage() {
         setInput(data.transcript);
         setAudioFile(null);
         setAudioStatus("transcribed");
-        setAudioInfo(`转写完成：${data.provider || "mock"}，${data.transcript.length} 字。`);
+        setAudioInfo(`转写完成：${data.provider || ""}，${data.transcript.length} 字。`);
       } else if (data.status === "asr_failed") {
         setAudioStatus("manual");
         setAudioError(`转写失败: ${data.error || "未知错误"}。请手动粘贴 transcript。`);

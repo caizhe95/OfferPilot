@@ -23,7 +23,13 @@ Web UI (Next.js)
 
 ## 快速启动
 
-### Mock 模式（无需 API Key）
+### 真实 OpenAI 兼容模式
+
+```powershell
+# 复制并编辑 .env
+copy .env.example .env
+# 编辑 .env 设置 OPENAI_API_KEY
+```
 
 ```powershell
 # 1. 启动 FastAPI 后端
@@ -42,14 +48,6 @@ npm run dev
 ```
 
 打开 http://localhost:3000
-
-### 真实 OpenAI 兼容模式
-
-```powershell
-# 复制并编辑 .env
-copy .env.example .env
-# 编辑 .env 设置 OPENAI_API_KEY 和 MOCK_AGENT=false
-```
 
 ### Docker Compose 一键启动
 

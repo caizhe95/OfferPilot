@@ -38,7 +38,6 @@ export interface AgentOptions {
   maxToolCalls: number;
   systemPrompt: string;
   model: Model<any>;
-  mockMode?: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,8 +1,6 @@
 """Application configuration loaded from environment variables."""
 
-import os
 from pathlib import Path
-from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -37,24 +35,8 @@ class Settings(BaseSettings):
 
     # Debug
     debug: bool = False
-    mock_agent: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
-
-    @field_validator("debug", "mock_agent", mode="before")
-    @classmethod
-    def parse_bool_like(cls, value):
-        """Parse common bool-ish env values and tolerate unrelated values."""
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return False
-        text = str(value).strip().lower()
-        if text in {"1", "true", "yes", "on", "debug", "development"}:
-            return True
-        if text in {"0", "false", "no", "off", "release", "production", ""}:
-            return False
-        return False
 
     @property
     def db_path(self) -> Path:

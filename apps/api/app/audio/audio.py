@@ -63,14 +63,6 @@ async def transcribe_audio(filepath: str) -> dict:
 
     Note: This requires permission approval (medium risk) before calling.
     """
-    if settings.mock_agent or not settings.openai_api_key or settings.openai_api_key == "sk-xxx":
-        return {
-            "transcript": "[Mock] 这是模拟的ASR转写结果，实际使用时会调用 Whisper API。",
-            "provider": "mock",
-            "duration_seconds": 0,
-            "language": "zh",
-        }
-
     try:
         from openai import OpenAI
         client = OpenAI(

@@ -11,7 +11,6 @@ services:
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
       - ASR_PROVIDER=${ASR_PROVIDER:-openai}
       - ASR_MODEL=${ASR_MODEL:-whisper-1}
-      - MOCK_AGENT=${MOCK_AGENT:-true}
       - SQLITE_PATH=/app/data/offerpilot.db
       - KNOWLEDGE_DIR=/app/knowledge/selected
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -32,7 +31,6 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
-      - MOCK_AGENT=${MOCK_AGENT:-true}
       - FASTAPI_BASE_URL=http://api:8000
     restart: unless-stopped
 

@@ -26,17 +26,6 @@ class StructuredLLMResult:
     error: str = ""
 
 
-def should_use_mock_llm() -> bool:
-    """Return True when the environment should not call a real model."""
-    if settings.mock_agent:
-        return True
-    if not settings.openai_api_key:
-        return True
-    if settings.openai_api_key == "sk-xxx":
-        return True
-    return False
-
-
 def _strip_code_fences(text: str) -> str:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -97,7 +86,6 @@ def structured_json_completion(
     user_payload: dict[str, Any],
     fallback_factory: Callable[[], dict[str, Any]],
     validator: Callable[[dict[str, Any]], bool] | None = None,
-    mock_factory: Callable[[], dict[str, Any]] | None = None,
     model: str | None = None,
     temperature: float = 0.2,
     timeout: float = 12.0,
@@ -108,10 +96,6 @@ def structured_json_completion(
     model output is replaced by the fallback payload.
     """
     fallback_payload = fallback_factory
-    if should_use_mock_llm():
-        data = (mock_factory or fallback_factory)()
-        return StructuredLLMResult(data=data, source="mock")
-
     try:
         raw_text = _call_openai_chat_json(
             system_prompt=system_prompt,

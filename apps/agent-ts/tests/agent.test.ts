@@ -140,7 +140,6 @@ describe("Agent (pi-mono based)", () => {
       maxToolCalls: 3,
       systemPrompt: "You are a test agent.",
       model,
-      mockMode: true,
     });
     return agent;
   }
@@ -176,7 +175,6 @@ describe("Agent (pi-mono based)", () => {
       maxToolCalls: 3,
       systemPrompt: "You are a test agent. Use search_knowledge tool.",
       model,
-      mockMode: true,
     });
 
     agent.addTools({

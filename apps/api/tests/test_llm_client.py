@@ -4,23 +4,7 @@ from app.core.config import settings
 from app.llm import llm_client
 
 
-def test_structured_completion_uses_mock_without_network(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", True)
-    monkeypatch.setattr(settings, "openai_api_key", "sk-real")
-
-    result = llm_client.structured_json_completion(
-        task_name="unit_mock",
-        system_prompt="Return JSON.",
-        user_payload={"input": "x"},
-        fallback_factory=lambda: {"ok": True},
-    )
-
-    assert result.source == "mock"
-    assert result.data == {"ok": True}
-
-
 def test_structured_completion_falls_back_on_invalid_json(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
     monkeypatch.setattr(settings, "openai_api_key", "sk-real")
     monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: "not json")
 
@@ -37,7 +21,6 @@ def test_structured_completion_falls_back_on_invalid_json(monkeypatch):
 
 
 def test_structured_completion_falls_back_on_validator_failure(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
     monkeypatch.setattr(settings, "openai_api_key", "sk-real")
     monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: '{"ok": false}')
 
@@ -54,7 +37,6 @@ def test_structured_completion_falls_back_on_validator_failure(monkeypatch):
 
 
 def test_structured_completion_accepts_valid_json(monkeypatch):
-    monkeypatch.setattr(settings, "mock_agent", False)
     monkeypatch.setattr(settings, "openai_api_key", "sk-real")
     monkeypatch.setattr(llm_client, "_call_openai_chat_json", lambda **kwargs: '{"ok": true}')
 
