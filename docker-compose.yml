@@ -1,0 +1,57 @@
+services:
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - ASR_PROVIDER=${ASR_PROVIDER:-openai}
+      - ASR_MODEL=${ASR_MODEL:-whisper-1}
+      - MOCK_AGENT=${MOCK_AGENT:-true}
+      - SQLITE_PATH=/app/data/offerpilot.db
+      - KNOWLEDGE_DIR=/app/knowledge/selected
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - AGENT_BASE_URL=http://agent:3001
+    volumes:
+      - sqlite-data:/app/data
+      - ./knowledge:/app/knowledge:ro
+      - ./harness:/app/harness:ro
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ./apps/agent-ts
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - MOCK_AGENT=${MOCK_AGENT:-true}
+      - FASTAPI_BASE_URL=http://api:8000
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        - API_BASE_URL=${API_BASE_URL:-http://api:8000}
+        - AGENT_BASE_URL=${AGENT_BASE_URL:-http://agent:3001}
+    ports:
+      - "3000:3000"
+    environment:
+      - API_BASE_URL=${API_BASE_URL:-http://api:8000}
+      - AGENT_BASE_URL=${AGENT_BASE_URL:-http://agent:3001}
+    depends_on:
+      - api
+      - agent
+    restart: unless-stopped
+
+volumes:
+  sqlite-data:

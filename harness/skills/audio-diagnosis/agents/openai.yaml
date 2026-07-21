@@ -1,0 +1,5 @@
+model: gpt-4o
+provider: openai
+purpose: audio-diagnosis
+temperature: 0.3
+max_tokens: 4096
