@@ -46,16 +46,16 @@
 - 实现 approval / deny
 - 实现 waiting_approval
 - 实现 audit_log
-- 实现拒绝后的明确失败状态
+- 实现拒绝后返回可继续处理的工具结果
 
 **通过标准：** low 自动允许。medium/high 触发确认。critical 拒绝。approve 后恢复 running。deny 后记录 audit。pytest 通过。
 
 ## Phase 5：Python 手写 Agent Loop
 
-- 初始化 `apps/api/app/agent`
+- 初始化 `src/api/offerpilot/agent`
 - 实现 Python Tool Registry
 - 接入现有知识检索、评分、语音分析、追问和 memory permission
-- `/api/coach` 是唯一产品入口；Coach Loop 使用原生 tool_calls，正式评分通过确定性 `run_diagnosis` 工具执行。
+- `/api/coach` 是唯一产品入口；Coach Loop 只使用原生 tool_calls，正式评分由显式 `mode="diagnosis"` 的确定性 Workflow 执行。
 - 输出标准 SSE 事件流
 
 **通过标准：** Agent 可调用 search_knowledge。工具失败返回结构化错误。流式事件包含 tool_call、tool_result、text_delta、done。pytest 通过。
@@ -144,7 +144,7 @@
 本轮补齐重点放在 FastAPI 后端与 Agent Harness 闭环，前端只保持最小兼容。
 
 - Permission Event 已标准化，`save_memory`、`export_report`、`transcribe_audio` 等 medium/high 风险工具统一返回 `permission_required`。
-- Session 与 Permission 已联动，高风险工具触发后进入 `waiting_approval`，approve 后可 resume，deny 后标记失败并写 audit。
+- Session 与 Permission 已联动，高风险工具触发后进入 `waiting_approval`，approve 或 deny 都有持久化决策；Coach 收到拒绝结果后继续生成答复，不把 Session 标记为失败。
 - Memory 保存改为审批闭环，诊断阶段只生成 candidates，不直接写入；approve + resume 后才保存，并可在下一次 context 中注入。
 - Hooks / Budget 已接入 `chat_api`、`diagnose_api` 与工具执行路径，覆盖 `pre_input`、`pre_tool`、`post_tool`、`post_output`、预算记录与输出检查。
 - 音频 ASR 已改为上传后先保存临时文件、再请求转写权限；批准前不调用 ASR，拒绝后清理临时文件。

@@ -1,10 +1,10 @@
 services:
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     environment:
       - OFFERPILOT_OPENAI_API_KEY=${OFFERPILOT_OPENAI_API_KEY}
       - OFFERPILOT_OPENAI_BASE_URL=${OFFERPILOT_OPENAI_BASE_URL}
@@ -20,26 +20,43 @@ services:
       - OFFERPILOT_SQLITE_PATH=/app/data/offerpilot.db
       - OFFERPILOT_KNOWLEDGE_DIR=/app/knowledge
       - OFFERPILOT_ADMIN_KEY=${OFFERPILOT_ADMIN_KEY}
+      - OFFERPILOT_PROFILE_SIGNING_KEY=${OFFERPILOT_PROFILE_SIGNING_KEY}
+      - OFFERPILOT_CORS_ORIGINS=${OFFERPILOT_CORS_ORIGINS:-http://localhost:3000}
+      - OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP=${OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP:-false}
+      - OFFERPILOT_DEBUG=${OFFERPILOT_DEBUG:-true}
       - OFFERPILOT_LOG_LEVEL=${OFFERPILOT_LOG_LEVEL:-info}
     volumes:
       - sqlite-data:/app/data
       - ./knowledge:/app/knowledge:ro
       - ./harness:/app/harness:ro
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   web:
     build:
-      context: ./apps/web
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
       args:
         - API_BASE_URL=${API_BASE_URL:-http://api:8000}
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     environment:
       - API_BASE_URL=${API_BASE_URL:-http://api:8000}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   sqlite-data:

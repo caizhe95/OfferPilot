@@ -2,149 +2,64 @@
 
 ## Session 状态机
 
-```
-ready ──> running ──> ready
-             │
-             ├──> waiting_approval ──> ready
-             └──> failed
-              │
-              └──> waiting_approval ──> running
-                    │
-                    ├──> paused
-                    │
-                    └──> cancelled
+```text
+ready -> running -> ready
+             |
+             -> waiting_approval -> running -> ready
+                                  -> ready (non-Coach approved operation)
+             -> failed -> ready (transient run failure)
 ```
 
-### 状态说明
+Session 用于承载连续练习，不把单轮成功、取消或临时 Provider 故障作为终态。`cancelled` 只保留给明确关闭整个 Session 的管理动作；当前轮取消体现在 `coach_runs.status` 和 SSE 的 `run_complete.status`。`run_complete.status` 只能为 `completed`、`waiting_approval`、`failed` 或 `cancelled`。
 
-| 状态 | 说明 |
-|---|---|
-| created | Session 已创建，等待输入 |
-| running | Agent 正在执行 |
-| waiting_approval | 等待用户审批工具调用 |
-| paused | 用户手动暂停 |
-| completed | 执行成功完成 |
-| failed | 执行失败 |
-| cancelled | 用户取消 |
+`waiting_approval` 是可恢复状态：应用重启不会清理它。启动恢复仅处理超过 90 秒的 `running` 和 `cancel_requested` 运行，将其对应 Session 恢复为 `ready`。
 
-### 状态流转规则
+## 统一审批记录
 
-- `created` → `running`：用户提交输入
-- `running` → `waiting_approval`：Agent 请求 medium/high 风险工具
-- `waiting_approval` → `running`：用户 approve
-- `waiting_approval` → `failed`：用户 deny
-- `running` → `completed`：Agent 成功完成
-- `running` → `failed`：Agent 执行异常
-- `running` → `paused`：用户暂停
-- `paused` → `running`：用户恢复
-- `running` / `waiting_approval` → `cancelled`：用户取消
+Coach、直接记忆接口、ASR 与报告导出都使用 `approval_requests` 表，而不是进程内 Map。审批记录带有 Profile、Session、工具、`flow_kind`、`trace_id`、私有参数、脱敏公开参数、过期时间和以下状态：
 
-## Progress 阶段
-
-```
-input_received
-  -> qa_extracted
-  -> permission_checked
-  -> knowledge_retrieved
-  -> diagnosis_evaluated
-  -> memory_updated
-  -> report_generated
-  -> output_checked
-  -> completed
+```text
+pending -> approved -> executing -> executed
+       -> denied
+       -> expired
+approved/executing -> failed
 ```
 
-每个阶段写入 `progress_events` 表，包含时间戳和可选 metadata。
+审批默认 24 小时过期，`pending` 与尚未执行的 `approved` 都会失效。`approved -> executing` 使用条件更新，因此重复 Resume 不能重复写记忆、调用 ASR 或导出报告。Coach 审批只能由 Coach Resume 消费，Audio 审批只能由音频 Resume 消费，Export 审批只能由报告导出 Resume 消费。
 
-## Permission 机制
+## 流程
 
-### 流程
-
-```
-Agent 请求 medium/high 风险工具
-    -> PermissionGate 检查风险等级
-    -> 返回 permission_required
-    -> Session 进入 waiting_approval
-    -> Web UI 展示确认卡片（工具名、风险等级、参数预览）
-    -> 用户选择 approve / deny
-    -> 写入 audit_log
-    -> approve: Agent 执行工具调用
-    -> deny: 当前受限工具流程结束
+```text
+tool call
+  -> risk policy
+  -> approval_requests.pending
+  -> SSE/API permission_required
+  -> approve or deny
+  -> Coach resume or one-time side-effect execution
 ```
 
-### 风险分级
+- low 风险工具自动执行。
+- medium 风险工具同一 Session 首次确认后可写入 `permission_grants`。
+- high 风险工具每次确认。
+- critical 风险工具默认拒绝。
 
-```
-low:       自动允许，不触发确认
-medium:    首次确认，可记住（session 级别）
-high:      每次确认，或用户在设置中显式开启后自动允许
-critical:  默认拒绝，需用户手动在设置中开启
-```
+音频仅保存服务端生成的上传标识，审批不保存或公开服务器路径。无论成功、失败、拒绝、取消或过期，音频临时文件都会删除。普通独立工具回到 `ready`；Coach 工具会将 `permission_denied` 放回同一 Agent Trace，让模型改用无需权限的路径或向用户说明，而不是让 Session 失败。
 
-### audit_log 记录
+## 标准事件与审计
 
-- session_id
-- tool_name
-- risk_level
-- action（request / approve / deny / execute）
-- params（JSON）
-- timestamp
-- result（approve 后记录工具返回摘要）
-
-## Permission 与 Session 联动
-
-1. `running` 状态下 Agent 提出 tool call
-2. PermissionGate 拦截 medium/high 工具
-3. 状态流转到 `waiting_approval`
-4. `audit_log` 记录 `request`
-5. 用户 approve → 回到 `running`，`audit_log` 记录 `approve`
-6. 用户 deny → `audit_log` 记录 `deny`，Agent 收到拒绝信号
-7. 当前受限工具流程结束，Session 进入明确失败状态
-
-## Checkpoint
-
-支持 Session 的检查点保存和恢复。
-
-**保存时机：**
-- 进入 `waiting_approval` 前
-- 用户手动暂停
-- 每完成一个 progress 阶段
-
-**包含内容：**
-- 当前状态
-- 已完成 progress
-- 最近消息
-- 已检索 knowledge
-- 已保存 memory keys
-
-## 标准 Permission Event
-
-medium/high 风险工具统一返回：
+`permission_required` 是扁平 SSE 事件，至少包含：
 
 ```json
 {
   "type": "permission_required",
-  "permission_required": true,
   "session_id": "session-id",
+  "trace_id": "trace-id",
+  "sequence": 3,
   "request_id": "request-id",
   "tool_name": "save_memory",
   "risk_level": "high",
-  "params": {},
-  "message": "Tool call requires user approval"
+  "params": {}
 }
 ```
 
-后端约定：
-
-- 工具 API 返回该结构时必须写 `audit_log action=request`。
-- Session 从 `running` 进入 `waiting_approval`。
-- `approve` 只确认用户决策并写 `approve`。
-- `resume` 消费已批准参数、执行原工具并写 `execute`。
-- `deny` 写 `deny`，并将当前 session 标记为 `failed`，避免无状态继续。
-
-## Memory 与音频权限
-
-- `run_diagnosis` 只生成 `memory_candidates`，Coach 需要通过高风险 `save_memory` 审批后才写入记忆。
-- `save_memory` 是 high 风险，必须 approve + resume 后才落库。
-- `/api/audio/upload` 会先保存临时音频，再触发 `transcribe_audio` medium 风险审批。
-- 用户 approve + resume 后才调用 ASR；deny 后不会调用外部 ASR，并清理可恢复参数中的临时文件。
-- Memory 只保存同一匿名 Profile 下经批准的白名单摘要；后续会话只读取该 Profile 的记录。
+`audit_log` 记录 request、approve、deny 和 execute 的工具、风险等级、参数摘要和结果摘要。日志不得记录密钥、Cookie、完整音频或完整候选回答。
