@@ -130,6 +130,7 @@ async def structured_json_completion(
     cancel_event: asyncio.Event | None = None,
     deadline: float | None = None,
     on_progress: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    on_fallback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> StructuredLLMResult:
     if provider.is_placeholder_key(settings.openai_api_key):
         raise provider.LLMUnavailableError()
@@ -191,7 +192,9 @@ async def structured_json_completion(
                             last_progress_at = current
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if not content_parts and provider.is_streaming_structured_response_unsupported(exc):
+                    raise provider.StreamingStructuredResponseUnsupportedError() from exc
                 raise
             raw_text = "".join(content_parts)
             input_tokens, output_tokens, total_tokens, reasoning_tokens = _usage_values(usage)
@@ -200,16 +203,37 @@ async def structured_json_completion(
             await client.close()
 
     try:
-        result = await provider.request_with_retry(
-            stream,
-            timeout=timeout,
-            task=task_name,
-            provider="deepseek",
-            model=selected_model,
-            max_attempt_seconds=MAX_STRUCTURED_ATTEMPT_SECONDS,
-            cancel_event=cancel_event,
-            deadline=request_deadline,
-        )
+        try:
+            result = await provider.request_with_retry(
+                stream,
+                timeout=timeout,
+                task=task_name,
+                provider="deepseek",
+                model=selected_model,
+                max_attempt_seconds=MAX_STRUCTURED_ATTEMPT_SECONDS,
+                cancel_event=cancel_event,
+                deadline=request_deadline,
+            )
+        except provider.ProviderRequestError as exc:
+            if exc.category != "stream_structured_unsupported":
+                raise
+            await provider.invoke_callback(
+                on_fallback,
+                {
+                    "reason": "stream_json_unsupported",
+                    "stream_mode": "non_stream_fallback",
+                },
+            )
+            result = await provider.request_with_retry(
+                lambda attempt_timeout: non_stream(attempt_timeout, "non_stream_fallback"),
+                timeout=max(0.001, request_deadline - asyncio.get_running_loop().time()),
+                task=task_name,
+                provider="deepseek",
+                model=selected_model,
+                max_attempt_seconds=MAX_STRUCTURED_ATTEMPT_SECONDS,
+                cancel_event=cancel_event,
+                deadline=request_deadline,
+            )
     except (AppError, asyncio.CancelledError):
         raise
     except Exception as exc:

@@ -11,18 +11,19 @@ from offerpilot.database.values import dumps, now
 from offerpilot.profiles.growth import rebuild_profile_growth
 
 
-def get_session_summary(session_id: str) -> dict[str, Any] | None:
+def get_session_summary(session_id: str, profile_id: str | None = None) -> dict[str, Any] | None:
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT session_id, summary_version, source_message_id, summary_json, updated_at "
-            "FROM session_summaries WHERE session_id = ?",
-            (session_id,),
+            "SELECT session_id, profile_id, summary_version, source_message_id, summary_json, updated_at "
+            "FROM session_summaries WHERE session_id = ?" + (" AND profile_id = ?" if profile_id is not None else ""),
+            (session_id,) if profile_id is None else (session_id, profile_id),
         ).fetchone()
         if row is None:
             return None
         return {
             "session_id": row["session_id"],
+            "profile_id": row["profile_id"],
             "summary_version": row["summary_version"],
             "source_message_id": row["source_message_id"],
             "summary_json": json.loads(row["summary_json"] or "{}"),
@@ -68,7 +69,7 @@ def rebuild_session_summary(session_id: str, profile_id: str) -> dict[str, Any]:
             (session_id,),
         ).fetchall()
         message = conn.execute(
-            "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1", (session_id,)
+            "SELECT id FROM messages WHERE session_id = ? AND profile_id = ? ORDER BY id DESC LIMIT 1", (session_id, profile_id)
         ).fetchone()
         auto_title = " ".join(str(latest["question"]).split())[:120] if latest else ""
         timestamp = now()
@@ -89,10 +90,10 @@ def rebuild_session_summary(session_id: str, profile_id: str) -> dict[str, Any]:
         ).fetchone()
         version = int(old["summary_version"] if old else 0) + 1
         conn.execute(
-            "INSERT INTO session_summaries(session_id, summary_version, source_message_id, summary_json, updated_at) "
-            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET summary_version=excluded.summary_version, "
+            "INSERT INTO session_summaries(session_id, profile_id, summary_version, source_message_id, summary_json, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET summary_version=excluded.summary_version, "
             "source_message_id=excluded.source_message_id, summary_json=excluded.summary_json, updated_at=excluded.updated_at",
-            (session_id, version, message["id"] if message else None, dumps(summary), timestamp),
+            (session_id, profile_id, version, message["id"] if message else None, dumps(summary), timestamp),
         )
         conn.commit()
     finally:

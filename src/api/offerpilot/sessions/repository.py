@@ -153,19 +153,29 @@ def add_message(
     run_id: str | None = None,
     kind: str = "text",
     metadata: dict[str, Any] | None = None,
+    profile_id: str | None = None,
 ) -> dict[str, Any]:
     timestamp = now()
     conn = get_db()
     try:
+        session = conn.execute("SELECT profile_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if session is None or (profile_id is not None and session["profile_id"] != profile_id):
+            raise LookupError("session_not_found")
+        owner = str(session["profile_id"])
+        if run_id is not None and conn.execute(
+            "SELECT 1 FROM runs WHERE id = ? AND session_id = ? AND profile_id = ?", (run_id, session_id, owner)
+        ).fetchone() is None:
+            raise LookupError("run_not_found")
         cursor = conn.execute(
-            "INSERT INTO messages(session_id, run_id, role, kind, content, metadata, created_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (session_id, run_id, role, kind, content, dumps(metadata or {}), timestamp),
+            "INSERT INTO messages(session_id, profile_id, run_id, role, kind, content, metadata, created_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, owner, run_id, role, kind, content, dumps(metadata or {}), timestamp),
         )
         conn.commit()
         return {
             "id": cursor.lastrowid,
             "session_id": session_id,
+            "profile_id": owner,
             "run_id": run_id,
             "role": role,
             "kind": kind,
@@ -183,20 +193,26 @@ def add_audio_transcript(session_id: str, run_id: str, content: str, upload_id: 
     conn = get_db()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        owner = conn.execute("SELECT profile_id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        if owner is None or conn.execute(
+            "SELECT 1 FROM runs WHERE id = ? AND session_id = ? AND profile_id = ?", (run_id, session_id, owner["profile_id"])
+        ).fetchone() is None:
+            raise LookupError("run_not_found")
         row = conn.execute(
-            "SELECT * FROM messages WHERE run_id = ? AND kind = 'audio_transcript'", (run_id,)
+            "SELECT * FROM messages WHERE run_id = ? AND profile_id = ? AND kind = 'audio_transcript'", (run_id, owner["profile_id"])
         ).fetchone()
         if row is None:
             cursor = conn.execute(
-                "INSERT INTO messages(session_id, run_id, role, kind, content, metadata, created_at) "
-                "VALUES(?, ?, 'user', 'audio_transcript', ?, ?, ?)",
-                (session_id, run_id, content, dumps(metadata), timestamp),
+                "INSERT INTO messages(session_id, profile_id, run_id, role, kind, content, metadata, created_at) "
+                "VALUES(?, ?, ?, 'user', 'audio_transcript', ?, ?, ?)",
+                (session_id, owner["profile_id"], run_id, content, dumps(metadata), timestamp),
             )
             row = conn.execute("SELECT * FROM messages WHERE id = ?", (cursor.lastrowid,)).fetchone()
         conn.commit()
         return {
             "id": row["id"],
             "session_id": row["session_id"],
+            "profile_id": row["profile_id"],
             "run_id": row["run_id"],
             "role": row["role"],
             "kind": row["kind"],
@@ -208,14 +224,18 @@ def add_audio_transcript(session_id: str, run_id: str, content: str, upload_id: 
         conn.close()
 
 
-def get_messages(session_id: str, n: int | None = None) -> list[dict[str, Any]]:
+def get_messages(session_id: str, n: int | None = None, profile_id: str | None = None) -> list[dict[str, Any]]:
     conn = get_db()
     try:
-        sql = "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC"
+        sql = "SELECT * FROM messages WHERE session_id = ?"
         params: list[Any] = [session_id]
+        if profile_id is not None:
+            sql += " AND profile_id = ?"
+            params.append(profile_id)
+        sql += " ORDER BY id ASC"
         if n is not None:
             sql = (
-                "SELECT * FROM (SELECT * FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT ?) "
+                "SELECT * FROM (SELECT * FROM messages WHERE session_id = ?" + (" AND profile_id = ?" if profile_id is not None else "") + " ORDER BY id DESC LIMIT ?) "
                 "ORDER BY id ASC"
             )
             params.append(max(1, min(n, 500)))
@@ -224,6 +244,7 @@ def get_messages(session_id: str, n: int | None = None) -> list[dict[str, Any]]:
             {
                 "id": row["id"],
                 "session_id": row["session_id"],
+                "profile_id": row["profile_id"],
                 "run_id": row["run_id"],
                 "role": row["role"],
                 "kind": row["kind"],

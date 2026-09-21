@@ -57,8 +57,8 @@ def _run_timing_conn(conn: Any, run_id: str, run_row: Any | None = None) -> dict
 
     approval_wait_ms = 0
     approvals = conn.execute(
-        "SELECT created_at, resolved_at FROM approvals WHERE run_id = ? ORDER BY created_at ASC",
-        (run_id,),
+        "SELECT created_at, resolved_at FROM approvals WHERE run_id = ? AND profile_id = ? ORDER BY created_at ASC",
+        (run_id, row["profile_id"]),
     ).fetchall()
     for approval in approvals:
         approval_created = _timestamp(approval["created_at"])
@@ -83,8 +83,8 @@ def _run_row(row: Any, conn: Any) -> dict[str, Any]:
     status = row["status"]
     timing = _run_timing_conn(conn, row["id"], row) if status in RUN_TERMINAL else None
     pending = conn.execute(
-        "SELECT * FROM approvals WHERE run_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1",
-        (row["id"],),
+        "SELECT * FROM approvals WHERE run_id = ? AND profile_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1",
+        (row["id"], row["profile_id"]),
     ).fetchone()
     public_approval = None
     if pending is not None:
@@ -160,8 +160,8 @@ def create_run(profile_id: str, session_id: str, run_type: str, input_data: dict
             (run_id, run_id, session_id, profile_id, run_type, idempotency_key, dumps(input_data), timestamp, timestamp, timestamp),
         )
         conn.execute(
-            "INSERT INTO run_events(run_id, session_id, sequence, event_type, data, created_at) VALUES(?, ?, 1, 'run_created', ?, ?)",
-            (run_id, session_id, dumps({"type": run_type}), timestamp),
+            "INSERT INTO run_events(run_id, session_id, profile_id, sequence, event_type, data, created_at) VALUES(?, ?, ?, 1, 'run_created', ?, ?)",
+            (run_id, session_id, profile_id, dumps({"type": run_type}), timestamp),
         )
         conn.commit()
     finally:
@@ -210,18 +210,19 @@ def list_active_run_ids(*, session_id: str | None = None, profile_id: str) -> li
 
 
 def _append_event_conn(conn: Any, run_id: str, event_type: str, data: dict[str, Any]) -> dict[str, Any]:
-    row = conn.execute("SELECT session_id, trace_id FROM runs WHERE id = ?", (run_id,)).fetchone()
+    row = conn.execute("SELECT session_id, profile_id, trace_id FROM runs WHERE id = ?", (run_id,)).fetchone()
     if row is None:
         raise LookupError("run_not_found")
     sequence = int(conn.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?", (run_id,)).fetchone()[0])
     timestamp = now()
     conn.execute(
-        "INSERT INTO run_events(run_id, session_id, sequence, event_type, data, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-        (run_id, row["session_id"], sequence, event_type, dumps(data), timestamp),
+        "INSERT INTO run_events(run_id, session_id, profile_id, sequence, event_type, data, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+        (run_id, row["session_id"], row["profile_id"], sequence, event_type, dumps(data), timestamp),
     )
     return {
         "type": event_type,
         "session_id": row["session_id"],
+        "profile_id": row["profile_id"],
         "trace_id": row["trace_id"] or run_id,
         "run_id": run_id,
         "sequence": sequence,
@@ -279,8 +280,8 @@ def transition_run(run_id: str, new_status: str, *, state: dict[str, Any] | None
         completed = timestamp if new_status in RUN_TERMINAL else row["completed_at"]
         heartbeat = timestamp
         conn.execute(
-            "UPDATE runs SET status = ?, state_json = ?, result_json = ?, error_code = ?, error_message = ?, started_at = ?, updated_at = ?, heartbeat_at = ?, completed_at = ? WHERE id = ?",
-            (new_status, dumps(state if state is not None else loads(row["state_json"], {})), dumps(result if result is not None else loads(row["result_json"], {})), error_code[:120], error_message[:500], started, timestamp, heartbeat, completed, run_id),
+            "UPDATE runs SET status = ?, state_json = ?, result_json = ?, error_code = ?, error_message = ?, started_at = ?, updated_at = ?, heartbeat_at = ?, completed_at = ? WHERE id = ? AND profile_id = ?",
+            (new_status, dumps(state if state is not None else loads(row["state_json"], {})), dumps(result if result is not None else loads(row["result_json"], {})), error_code[:120], error_message[:500], started, timestamp, heartbeat, completed, run_id, row["profile_id"]),
         )
         updated_row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
         if event_type:
@@ -364,13 +365,24 @@ def request_cancel(run_id: str, profile_id: str) -> bool:
         conn.close()
 
 
-def events_after(run_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+def events_after(
+    run_id: str,
+    after: int = 0,
+    limit: int = 500,
+    profile_id: str | None = None,
+) -> list[dict[str, Any]]:
     conn = get_db()
     try:
+        params: list[Any] = [run_id]
+        ownership = ""
+        if profile_id is not None:
+            ownership = " AND e.profile_id = ?"
+            params.append(profile_id)
+        params.extend([max(0, after), max(1, min(limit, 1000))])
         rows = conn.execute(
-            "SELECT e.*, r.trace_id FROM run_events e JOIN runs r ON r.id = e.run_id "
-            "WHERE e.run_id = ? AND e.sequence > ? ORDER BY e.sequence ASC LIMIT ?",
-            (run_id, max(0, after), max(1, min(limit, 1000))),
+            "SELECT e.*, r.trace_id FROM run_events e JOIN runs r ON r.id = e.run_id AND r.profile_id = e.profile_id "
+            "WHERE e.run_id = ? AND e.profile_id = r.profile_id" + ownership + " AND e.sequence > ? ORDER BY e.sequence ASC LIMIT ?",
+            params,
         ).fetchall()
         return [
             {

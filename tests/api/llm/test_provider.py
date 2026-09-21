@@ -63,6 +63,82 @@ async def test_structured_stream_reassembles_json_and_usage(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_structured_completion_falls_back_only_when_stream_json_is_unsupported(monkeypatch):
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    calls: list[bool] = []
+    fallback_events: list[dict] = []
+
+    class UnsupportedStream(Exception):
+        status_code = 400
+
+    class Client:
+        chat = SimpleNamespace(completions=SimpleNamespace())
+
+        async def close(self):
+            pass
+
+    async def create(**kwargs):
+        calls.append(bool(kwargs.get("stream")))
+        if kwargs.get("stream"):
+            raise UnsupportedStream("stream does not support response_format json_object")
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'), finish_reason="stop")],
+            usage=None,
+        )
+
+    def create_client(**_kwargs):
+        client = Client()
+        client.chat.completions.create = create
+        return client
+
+    monkeypatch.setattr(provider, "create_client", create_client)
+    result = await structured.structured_json_completion(
+        task_name="unit",
+        system_prompt="JSON",
+        user_payload={},
+        on_fallback=fallback_events.append,
+    )
+
+    assert calls == [True, False]
+    assert result.data == {"ok": True}
+    assert result.stream_mode == "non_stream_fallback"
+    assert fallback_events == [
+        {"reason": "stream_json_unsupported", "stream_mode": "non_stream_fallback"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structured_completion_does_not_fallback_for_other_invalid_requests(monkeypatch):
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    fallback_events: list[dict] = []
+
+    class InvalidRequest(Exception):
+        status_code = 400
+
+    class Client:
+        chat = SimpleNamespace(completions=SimpleNamespace())
+
+        async def close(self):
+            pass
+
+    async def create(**_kwargs):
+        raise InvalidRequest("invalid model")
+
+    client = Client()
+    client.chat.completions.create = create
+    monkeypatch.setattr(provider, "create_client", lambda **_: client)
+
+    with pytest.raises(provider.LLMUnavailableError):
+        await structured.structured_json_completion(
+            task_name="unit",
+            system_prompt="JSON",
+            user_payload={},
+            on_fallback=fallback_events.append,
+        )
+    assert fallback_events == []
+
+
+@pytest.mark.asyncio
 async def test_provider_retries_and_honors_retry_after(monkeypatch):
     calls, delays = [], []
     class RateLimited(Exception):

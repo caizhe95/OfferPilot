@@ -6,9 +6,9 @@ from offerpilot.diagnosis import context_builder
 def test_context_never_exceeds_max_chars(monkeypatch):
     monkeypatch.setattr(context_builder, "_build_system_prompt", lambda: "system")
     monkeypatch.setattr(context_builder, "load_diagnosis_rules", lambda: "rules")
-    monkeypatch.setattr(context_builder, "_summary_context", lambda _session_id: "summary " * 50)
+    monkeypatch.setattr(context_builder, "_summary_context", lambda _session_id, _profile_id: "summary " * 50)
     monkeypatch.setattr(context_builder, "_memory_context", lambda _profile_id: "memory " * 50)
-    monkeypatch.setattr(context_builder, "_history_context", lambda _session_id, _recent_n: "history " * 50)
+    monkeypatch.setattr(context_builder, "_history_context", lambda _session_id, _profile_id, _recent_n: "history " * 50)
 
     result = context_builder.build_context(
         session_id="session",
@@ -25,9 +25,9 @@ def test_context_never_exceeds_max_chars(monkeypatch):
 def test_context_accounts_for_truncation_suffix(monkeypatch):
     monkeypatch.setattr(context_builder, "_build_system_prompt", lambda: "system")
     monkeypatch.setattr(context_builder, "load_diagnosis_rules", lambda: "rules")
-    monkeypatch.setattr(context_builder, "_summary_context", lambda _session_id: "summary")
+    monkeypatch.setattr(context_builder, "_summary_context", lambda _session_id, _profile_id: "summary")
     monkeypatch.setattr(context_builder, "_memory_context", lambda _profile_id: "memory")
-    monkeypatch.setattr(context_builder, "_history_context", lambda _session_id, _recent_n: "history")
+    monkeypatch.setattr(context_builder, "_history_context", lambda _session_id, _profile_id, _recent_n: "history")
 
     result = context_builder.build_context(
         session_id="session",

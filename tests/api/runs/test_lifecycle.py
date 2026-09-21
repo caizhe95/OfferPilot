@@ -180,14 +180,14 @@ def test_followup_failure_restores_pending_state_and_session_delete_removes_memo
     conn = get_db()
     try:
         conn.execute(
-            "INSERT INTO session_followups(id, session_id, question, reason, status, created_at, updated_at) VALUES(?, ?, ?, ?, 'pending', ?, ?)",
-            (followup_id, session["id"], "请补充超时边界", "覆盖遗漏考点", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            "INSERT INTO session_followups(id, session_id, profile_id, question, reason, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, 'pending', ?, ?)",
+            (followup_id, session["id"], PROFILE_ID, "请补充超时边界", "覆盖遗漏考点", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
         )
         conn.commit()
     finally:
         conn.close()
     assert link_followup(followup_id, session["id"], PROFILE_ID, run["id"])
-    finish_followup_for_run(run["id"], False)
+    finish_followup_for_run(run["id"], PROFILE_ID, False)
     assert claim_pending_run(run["id"])["status"] == "running"
     approval_id = create_approval(
         run["id"], session["id"], PROFILE_ID, "save_memory", "high", {"key": "weakness"}, "coach"
@@ -229,8 +229,8 @@ def _seed_point_result(session_id: str, point_id: str, status: str, index: int) 
             (report_id, run["id"], session_id, PROFILE_ID, f"问题 {index}", f"回答 {index}", created_at),
         )
         conn.execute(
-            "INSERT INTO diagnosis_point_results(id, report_id, exam_point_id, status, explanation, created_at) VALUES(?, ?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), report_id, point_id, status, "测试", created_at),
+            "INSERT INTO diagnosis_point_results(id, report_id, profile_id, exam_point_id, status, explanation, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), report_id, PROFILE_ID, point_id, status, "测试", created_at),
         )
         conn.commit()
     finally:

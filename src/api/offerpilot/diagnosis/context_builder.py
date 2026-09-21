@@ -14,9 +14,9 @@ def build_context(session_id: str, profile_id: str, user_input: str, knowledge_r
         ("rules", load_diagnosis_rules(), True),
         ("input", user_input, True),
         ("knowledge", _format_knowledge(knowledge_results or []), False),
-        ("summary", _summary_context(session_id), False),
+        ("summary", _summary_context(session_id, profile_id), False),
         ("memory", _memory_context(profile_id), False),
-        ("history", _history_context(session_id, recent_n), False),
+        ("history", _history_context(session_id, profile_id, recent_n), False),
     ]
     def header(name: str) -> str:
         return f"\n<!-- {name.upper()} -->\n"
@@ -61,8 +61,8 @@ def _build_system_prompt() -> str:
 Always output in Simplified Chinese and follow the structured output contract."""
 
 
-def _history_context(session_id: str, recent_n: int) -> str:
-    messages = get_messages(session_id, n=recent_n)
+def _history_context(session_id: str, profile_id: str, recent_n: int) -> str:
+    messages = get_messages(session_id, n=recent_n, profile_id=profile_id)
     return "\n".join(f"[{item['role']}]: {item['content']}" for item in messages)
 
 
@@ -73,8 +73,8 @@ def _memory_context(profile_id: str) -> str:
     return "## Approved Practice Memory\n" + "\n".join(f"- [{item['key']}] {item['value']}" for item in memories[:12])
 
 
-def _summary_context(session_id: str) -> str:
-    summary = get_session_summary(session_id)
+def _summary_context(session_id: str, profile_id: str) -> str:
+    summary = get_session_summary(session_id, profile_id)
     if not summary:
         return ""
     return "## Session Historical Summary (not scoring evidence)\n" + str(summary.get("summary_json", summary))

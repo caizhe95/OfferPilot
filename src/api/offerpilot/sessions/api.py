@@ -90,7 +90,7 @@ async def get_messages_endpoint(
     profile_id: str = Depends(require_profile_id),
 ):
     require_owned_session(session_id, profile_id)
-    return {"messages": get_messages(session_id, n=n)}
+    return {"messages": get_messages(session_id, n=n, profile_id=profile_id)}
 
 
 @router.get("/sessions/{session_id}/runs")
@@ -102,7 +102,7 @@ async def get_session_runs_endpoint(session_id: str, profile_id: str = Depends(r
 @router.get("/sessions/{session_id}/summary")
 async def get_summary_endpoint(session_id: str, profile_id: str = Depends(require_profile_id)):
     require_owned_session(session_id, profile_id)
-    return get_session_summary(session_id) or {
+    return get_session_summary(session_id, profile_id) or {
         "session_id": session_id,
         "summary_version": 0,
         "summary_json": {},

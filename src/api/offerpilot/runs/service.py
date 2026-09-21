@@ -243,7 +243,7 @@ class RunService:
         if cancel_event.is_set():
             raise asyncio.CancelledError()
         if result.get("report_id"):
-            result["followups"] = create_followups(run["session_id"], result["report_id"], result.get("diagnosis", {}))
+            result["followups"] = create_followups(run["session_id"], run["profile_id"], result["report_id"], result.get("diagnosis", {}))
         rebuild_session_summary(run["session_id"], run["profile_id"])
         await self._finalize(run["id"], "completed", result=result)
 
@@ -376,7 +376,7 @@ class RunService:
         if updated is None:
             return
         if status != "completed":
-            finish_followup_for_run(run_id, False)
+            finish_followup_for_run(run_id, updated["profile_id"], False)
             cancel_open_approvals(run_id, error=error_code or status)
             if updated["type"] == "audio_transcription":
                 upload_id = str(updated["input"].get("upload_id", ""))
@@ -392,7 +392,7 @@ class RunService:
         else:
             followup_id = updated["input"].get("followup_id")
             if followup_id:
-                finish_followup_for_run(run_id, True)
+                finish_followup_for_run(run_id, updated["profile_id"], True)
         timing = get_run_timing(run_id)
         if status in {"failed", "interrupted"}:
             write_log(

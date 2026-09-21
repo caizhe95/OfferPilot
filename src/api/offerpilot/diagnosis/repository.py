@@ -33,9 +33,9 @@ def save_report(*, run_id: str, session_id: str, profile_id: str, question: str,
         if active is None:
             raise AppError("Diagnosis run is no longer active", code="diagnosis_not_active", status_code=409)
         conn.execute("INSERT INTO diagnosis_reports(id, run_id, session_id, profile_id, question, answer, content_scores, voice_scores, overall_score, report_markdown, diagnosis_json, sources, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (report_id, run_id, session_id, profile_id, question, answer, _json(diagnosis["content_scores"]), _json(diagnosis["voice_scores"]), overall_score, markdown, _json(diagnosis), _json(sources), timestamp))
-        message = conn.execute("INSERT INTO messages(session_id, run_id, role, kind, content, metadata, created_at) VALUES(?, ?, 'assistant', 'diagnosis_report', ?, ?, ?)", (session_id, run_id, markdown, _json({"report_id": report_id}), timestamp))
+        message = conn.execute("INSERT INTO messages(session_id, profile_id, run_id, role, kind, content, metadata, created_at) VALUES(?, ?, ?, 'assistant', 'diagnosis_report', ?, ?, ?)", (session_id, profile_id, run_id, markdown, _json({"report_id": report_id}), timestamp))
         for point in diagnosis.get("exam_points", []):
-            conn.execute("INSERT INTO diagnosis_point_results(id, report_id, exam_point_id, status, evidence, explanation, source_knowledge_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), report_id, str(point["point_id"]), point.get("status", "missing"), point.get("evidence"), point.get("explanation", ""), point.get("knowledge_id"), timestamp))
+            conn.execute("INSERT INTO diagnosis_point_results(id, report_id, profile_id, exam_point_id, status, evidence, explanation, source_knowledge_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)", (str(uuid.uuid4()), report_id, profile_id, str(point["point_id"]), point.get("status", "missing"), point.get("evidence"), point.get("explanation", ""), point.get("knowledge_id"), timestamp))
         conn.commit()
     except Exception:
         conn.rollback()

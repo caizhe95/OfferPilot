@@ -134,7 +134,9 @@ class CoachLoop:
     async def run(self) -> AgentResult:
         try:
             self._deadline = deadline_after(COACH_TIMEOUT_SECONDS)
-            history = bounded_history(get_messages(self.session_id, n=HISTORY_MESSAGES))
+            history = bounded_history(
+                get_messages(self.session_id, n=HISTORY_MESSAGES, profile_id=self.profile_id)
+            )
             messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}, *history]
             self.result = await self._continue(messages, iteration=0, tool_calls=0)
             return self.result
@@ -373,7 +375,14 @@ class CoachLoop:
         elif content:
             content = content[: max(0, MAX_OUTPUT_CHARS - self._output_chars)]
         if content:
-            add_message(self.session_id, "assistant", content, run_id=self.run_id, kind="coach_response")
+            add_message(
+                self.session_id,
+                "assistant",
+                content,
+                run_id=self.run_id,
+                kind="coach_response",
+                profile_id=self.profile_id,
+            )
             if not already_streamed:
                 await self._emit("text_delta", content=content)
         await self._emit("final_response", content=content, termination_reason=reason)

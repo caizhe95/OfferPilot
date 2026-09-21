@@ -104,5 +104,11 @@ async def save_manual_transcript(
     profile_id: str = Depends(require_profile_id),
 ):
     require_active_session(session_id, profile_id)
-    saved = add_message(session_id, "user", body.transcript.strip(), kind="audio_transcript")
+    saved = add_message(
+        session_id,
+        "user",
+        body.transcript.strip(),
+        kind="audio_transcript",
+        profile_id=profile_id,
+    )
     return {"message": saved}

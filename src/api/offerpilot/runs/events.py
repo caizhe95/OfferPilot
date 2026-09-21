@@ -15,18 +15,23 @@ def notify(run_id: str) -> None:
     _signals[run_id].set()
 
 
-async def stream(run_id: str, after: int = 0, heartbeat_seconds: float = 15.0) -> AsyncIterator[dict]:
+async def stream(
+    run_id: str,
+    after: int = 0,
+    heartbeat_seconds: float = 15.0,
+    profile_id: str | None = None,
+) -> AsyncIterator[dict]:
     sequence = max(0, after)
     while True:
         signal = _signals[run_id]
         signal.clear()
-        events = events_after(run_id, sequence)
+        events = events_after(run_id, sequence, profile_id=profile_id)
         if events:
             for event in events:
                 sequence = event["sequence"]
                 yield event
             continue
-        run = get_run(run_id)
+        run = get_run(run_id, profile_id)
         if run is None:
             return
         if run["status"] in {"completed", "failed", "cancelled", "interrupted"}:

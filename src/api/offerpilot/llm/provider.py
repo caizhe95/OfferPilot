@@ -34,6 +34,10 @@ class ProviderRequestError(LLMUnavailableError):
         self.category = category
 
 
+class StreamingStructuredResponseUnsupportedError(Exception):
+    """The provider explicitly rejected streaming structured output."""
+
+
 def is_placeholder_key(value: str) -> bool:
     key = (value or "").strip()
     return not key or key.lower() in {"sk-xxx", "sk-...", "your-api-key", "<your-api-key>"}
@@ -47,6 +51,8 @@ def classify_provider_error(exc: BaseException) -> tuple[str, bool, float | None
     retry_after_seconds = parse_retry_after(retry_after)
     name = exc.__class__.__name__.lower()
     text = str(exc).lower()
+    if isinstance(exc, StreamingStructuredResponseUnsupportedError):
+        return "stream_structured_unsupported", False, None
     if status in {401, 403}:
         return "authentication", False, None
     if status in {400, 404, 409, 413, 422} or "schema" in text or "context" in text:
@@ -60,6 +66,20 @@ def classify_provider_error(exc: BaseException) -> tuple[str, bool, float | None
     if "connection" in name or "network" in name or "connect" in text:
         return "network", True, retry_after_seconds
     return "provider_request", False, retry_after_seconds
+
+
+def is_streaming_structured_response_unsupported(exc: BaseException) -> bool:
+    """Recognize only explicit provider rejections of stream + JSON mode."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status not in {400, 422}:
+        return False
+    text = str(exc).lower()
+    mentions_stream = "stream" in text or "streaming" in text
+    mentions_structured = any(
+        marker in text
+        for marker in ("response_format", "json_object", "json schema", "structured output")
+    )
+    return mentions_stream and mentions_structured
 
 
 def parse_retry_after(value: object) -> float | None:

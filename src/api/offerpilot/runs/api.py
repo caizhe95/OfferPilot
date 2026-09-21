@@ -64,7 +64,7 @@ async def coach_state_endpoint(
     return {
         "session_id": session_id,
         "run": run,
-        "trace": events_after(run["id"], 0),
+        "trace": events_after(run["id"], 0, profile_id=profile_id),
         "approval": _public_approval(approval),
     }
 
@@ -90,7 +90,14 @@ async def create_run_endpoint(
         raise AppError("Invalid Run input", code=str(exc), status_code=422) from exc
     if not reused:
         if body.type == "coach":
-            add_message(session_id, "user", input_data["message"], run_id=run["id"], kind="coach_input")
+            add_message(
+                session_id,
+                "user",
+                input_data["message"],
+                run_id=run["id"],
+                kind="coach_input",
+                profile_id=profile_id,
+            )
         elif body.type == "diagnosis":
             add_message(
                 session_id,
@@ -98,6 +105,7 @@ async def create_run_endpoint(
                 f"[Formal diagnosis]\nQuestion: {input_data['question']}\nAnswer: {input_data['answer']}",
                 run_id=run["id"],
                 kind="diagnosis_input",
+                profile_id=profile_id,
             )
             followup_id = input_data.get("followup_id")
             if isinstance(followup_id, str) and not link_followup(
@@ -154,7 +162,7 @@ async def run_events_endpoint(
     profile_id: str = Depends(require_profile_id),
 ):
     _owned_run(run_id, profile_id)
-    return {"events": events_after(run_id, after)}
+    return {"events": events_after(run_id, after, profile_id=profile_id)}
 
 
 @router.get("/runs/{run_id}/stream")
@@ -169,7 +177,7 @@ async def run_stream_endpoint(
         after = max(after, int(last_event_id))
 
     async def event_stream():
-        async for event in stream(run_id, after):
+        async for event in stream(run_id, after, profile_id=profile_id):
             yield ": ping\n\n" if event["type"] == "ping" else _sse(event)
 
     return StreamingResponse(

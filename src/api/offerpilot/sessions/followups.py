@@ -10,7 +10,7 @@ from offerpilot.database.values import now
 
 
 def create_followups(
-    session_id: str, report_id: str, diagnosis: dict[str, Any], limit: int = 5
+    session_id: str, profile_id: str, report_id: str, diagnosis: dict[str, Any], limit: int = 5
 ) -> list[dict[str, Any]]:
     followups = diagnosis.get("followups", []) if isinstance(diagnosis, dict) else []
     conn = get_db()
@@ -24,6 +24,7 @@ def create_followups(
             record = {
                 "id": str(uuid.uuid4()),
                 "session_id": session_id,
+                "profile_id": profile_id,
                 "source_report_id": report_id,
                 "exam_point_id": item.get("exam_point_id"),
                 "question": question[:1000],
@@ -35,11 +36,12 @@ def create_followups(
                 "answered_at": "",
             }
             conn.execute(
-                "INSERT INTO session_followups(id, session_id, source_report_id, exam_point_id, "
-                "question, reason, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                "INSERT INTO session_followups(id, session_id, profile_id, source_report_id, exam_point_id, "
+                "question, reason, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
                 (
                     record["id"],
                     session_id,
+                    profile_id,
                     report_id,
                     record["exam_point_id"],
                     record["question"],
@@ -83,13 +85,13 @@ def link_followup(followup_id: str, session_id: str, profile_id: str, run_id: st
         conn.close()
 
 
-def finish_followup_for_run(run_id: str, answered: bool) -> None:
+def finish_followup_for_run(run_id: str, profile_id: str, answered: bool) -> None:
     conn = get_db()
     try:
         timestamp = now()
         conn.execute(
-            "UPDATE session_followups SET status = ?, answered_at = ?, updated_at = ? WHERE linked_run_id = ?",
-            ("answered" if answered else "pending", timestamp if answered else "", timestamp, run_id),
+            "UPDATE session_followups SET status = ?, answered_at = ?, updated_at = ? WHERE linked_run_id = ? AND profile_id = ?",
+            ("answered" if answered else "pending", timestamp if answered else "", timestamp, run_id, profile_id),
         )
         conn.commit()
     finally:

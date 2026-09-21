@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(id, profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -35,8 +36,10 @@ CREATE TABLE IF NOT EXISTS runs (
     heartbeat_at TEXT NOT NULL DEFAULT '',
     completed_at TEXT NOT NULL DEFAULT '',
     cancel_requested_at TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(id, profile_id),
+    UNIQUE(id, session_id, profile_id),
     UNIQUE(profile_id, session_id, idempotency_key)
 );
 
@@ -44,26 +47,29 @@ CREATE TABLE IF NOT EXISTS run_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
     sequence INTEGER NOT NULL,
     event_type TEXT NOT NULL,
     data TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
     UNIQUE(run_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
     run_id TEXT,
     role TEXT NOT NULL CHECK(role IN ('system', 'user', 'assistant', 'tool')),
     kind TEXT NOT NULL DEFAULT 'text',
     content TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE SET NULL
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    UNIQUE(id, profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS approvals (
@@ -84,9 +90,10 @@ CREATE TABLE IF NOT EXISTS approvals (
     expires_at TEXT NOT NULL DEFAULT '',
     executed_at TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(id, run_id, session_id, profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS profile_memories (
@@ -101,25 +108,30 @@ CREATE TABLE IF NOT EXISTS profile_memories (
     category TEXT NOT NULL DEFAULT 'general',
     created_at TEXT NOT NULL,
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
-    FOREIGN KEY (source_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (source_run_id) REFERENCES runs(id) ON DELETE SET NULL,
-    FOREIGN KEY (approval_id) REFERENCES approvals(id) ON DELETE SET NULL,
+    FOREIGN KEY (source_session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_run_id, source_session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_report_id, source_session_id, profile_id) REFERENCES diagnosis_reports(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (approval_id, source_run_id, source_session_id, profile_id)
+        REFERENCES approvals(id, run_id, session_id, profile_id) ON DELETE CASCADE,
     UNIQUE(approval_id)
 );
 
 CREATE TABLE IF NOT EXISTS session_summaries (
     session_id TEXT PRIMARY KEY,
+    profile_id TEXT NOT NULL,
     summary_version INTEGER NOT NULL DEFAULT 0,
     source_message_id INTEGER,
     summary_json TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_message_id, profile_id) REFERENCES messages(id, profile_id) ON DELETE CASCADE,
+    UNIQUE(session_id, profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS session_followups (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
     source_report_id TEXT,
     exam_point_id TEXT,
     question TEXT NOT NULL,
@@ -129,9 +141,9 @@ CREATE TABLE IF NOT EXISTS session_followups (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     answered_at TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (source_report_id) REFERENCES diagnosis_reports(id) ON DELETE SET NULL,
-    FOREIGN KEY (linked_run_id) REFERENCES runs(id) ON DELETE SET NULL
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (source_report_id, session_id, profile_id) REFERENCES diagnosis_reports(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (linked_run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS profile_growth_summaries (
@@ -156,21 +168,24 @@ CREATE TABLE IF NOT EXISTS diagnosis_reports (
     diagnosis_json TEXT NOT NULL DEFAULT '{}',
     sources TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
+    UNIQUE(id, profile_id),
+    UNIQUE(id, session_id, profile_id)
 );
 
 CREATE TABLE IF NOT EXISTS diagnosis_point_results (
     id TEXT PRIMARY KEY,
     report_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
     exam_point_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('covered', 'partial', 'missing')),
     evidence TEXT,
     explanation TEXT NOT NULL DEFAULT '',
     source_knowledge_id INTEGER,
     created_at TEXT NOT NULL,
-    FOREIGN KEY (report_id) REFERENCES diagnosis_reports(id) ON DELETE CASCADE,
+    FOREIGN KEY (report_id, profile_id) REFERENCES diagnosis_reports(id, profile_id) ON DELETE CASCADE,
     FOREIGN KEY (source_knowledge_id) REFERENCES knowledge(id) ON DELETE SET NULL
 );
 
@@ -233,9 +248,9 @@ CREATE TABLE IF NOT EXISTS audio_uploads (
     updated_at TEXT NOT NULL,
     deleted_at TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE SET NULL
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS operation_logs (
@@ -250,8 +265,8 @@ CREATE TABLE IF NOT EXISTS operation_logs (
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, updated_at DESC);
