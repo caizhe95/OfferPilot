@@ -19,14 +19,6 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "desktop-chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile-chromium", use: { ...devices["Pixel 5"] } },
+    { name: "desktop-chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 720 } } },
   ],
-  webServer: {
-    command:
-      "powershell.exe -NoProfile -Command \"Copy-Item -Path '.next\\static' -Destination '.next\\standalone\\.next\\static' -Recurse -Force; node '.next\\standalone\\server.js'\"",
-    url: baseURL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-  },
 });

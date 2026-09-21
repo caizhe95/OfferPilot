@@ -16,11 +16,7 @@ PROJECT_ROOT = next(
 class Settings(BaseSettings):
     """Application settings."""
 
-    # API
-    api_host: str = "0.0.0.0"
-    api_port: int = 8000
-
-    # OpenAI-compatible text LLM
+    # Official DeepSeek text model
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
@@ -29,14 +25,13 @@ class Settings(BaseSettings):
     sqlite_path: str = "./data/offerpilot.db"
     admin_key: str = ""
     profile_signing_key: str = ""
-    allow_legacy_profile_bootstrap: bool = False
     cors_origins: str = "http://localhost:3000"
 
-    # Knowledge
-    knowledge_dir: str = "./knowledge"
+    # Runtime assets
+    knowledge_dir: str = "./resources/knowledge"
+    rules_dir: str = "./resources/rules"
 
-    # OpenAI-compatible embedding service
-    embedding_provider: str = "openai-compatible"
+    # Independent embedding service
     embedding_api_key: str = ""
     embedding_base_url: str = ""
     embedding_model: str = "text-embedding-3-small"
@@ -53,8 +48,6 @@ class Settings(BaseSettings):
         default="mimo-v2.5-asr",
         validation_alias=AliasChoices("MIMO_ASR_MODEL"),
     )
-    audio_upload_max_bytes_per_second: int = 5 * 1024 * 1024
-
     # Logging
     log_level: str = "INFO"
 
@@ -79,6 +72,11 @@ class Settings(BaseSettings):
     @property
     def resolved_knowledge_dir(self) -> Path:
         path = Path(self.knowledge_dir)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    @property
+    def resolved_rules_dir(self) -> Path:
+        path = Path(self.rules_dir)
         return path if path.is_absolute() else PROJECT_ROOT / path
 
     @property

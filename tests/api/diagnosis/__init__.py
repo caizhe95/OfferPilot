@@ -1,0 +1,1 @@
+"""Diagnosis feature tests."""

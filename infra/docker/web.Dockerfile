@@ -2,6 +2,7 @@
 FROM node:20-alpine AS builder
 
 WORKDIR /app
+RUN apk add --no-cache libc6-compat
 ARG API_BASE_URL=http://api:8000
 ENV API_BASE_URL=${API_BASE_URL}
 COPY src/web/package.json src/web/package-lock.json ./
@@ -13,6 +14,7 @@ RUN npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
+RUN apk add --no-cache libc6-compat
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 

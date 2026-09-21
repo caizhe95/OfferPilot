@@ -18,18 +18,22 @@ services:
       - MIMO_BASE_URL=${MIMO_BASE_URL:-https://api.xiaomimimo.com/v1}
       - MIMO_ASR_MODEL=${MIMO_ASR_MODEL:-mimo-v2.5-asr}
       - OFFERPILOT_SQLITE_PATH=/app/data/offerpilot.db
-      - OFFERPILOT_KNOWLEDGE_DIR=/app/knowledge
+      - OFFERPILOT_KNOWLEDGE_DIR=/app/resources/knowledge
+      - OFFERPILOT_RULES_DIR=/app/resources/rules
       - OFFERPILOT_ADMIN_KEY=${OFFERPILOT_ADMIN_KEY}
       - OFFERPILOT_PROFILE_SIGNING_KEY=${OFFERPILOT_PROFILE_SIGNING_KEY}
       - OFFERPILOT_CORS_ORIGINS=${OFFERPILOT_CORS_ORIGINS:-http://localhost:3000}
-      - OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP=${OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP:-false}
-      - OFFERPILOT_DEBUG=${OFFERPILOT_DEBUG:-true}
-      - OFFERPILOT_LOG_LEVEL=${OFFERPILOT_LOG_LEVEL:-info}
+      - OFFERPILOT_DEBUG=${OFFERPILOT_DEBUG:-false}
+      - OFFERPILOT_LOG_LEVEL=${OFFERPILOT_LOG_LEVEL:-INFO}
     volumes:
       - sqlite-data:/app/data
-      - ./knowledge:/app/knowledge:ro
-      - ./harness:/app/harness:ro
+      - ./resources:/app/resources:ro
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
       interval: 10s
@@ -51,6 +55,11 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 10s
@@ -60,3 +69,4 @@ services:
 
 volumes:
   sqlite-data:
+    name: offerpilot-sqlite-data-current

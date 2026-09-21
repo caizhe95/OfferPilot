@@ -1,0 +1,1 @@
+"""SQLite infrastructure for OfferPilot."""

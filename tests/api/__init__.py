@@ -1,1 +1,1 @@
-"""OfferPilot Lite tests."""
+"""Backend test package."""

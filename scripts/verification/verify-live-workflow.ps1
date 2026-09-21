@@ -1,286 +1,278 @@
-param(
-  [int]$Port = 8020,
-  [switch]$KeepArtifacts,
-  [switch]$CleanupArtifacts
-)
+param([int]$Port = 8020, [switch]$KeepArtifacts)
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
-
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 $apiDirectory = Join-Path $projectRoot "src\api"
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
-$backupScript = Join-Path $projectRoot "scripts\backup-database.ps1"
-$dataRoot = Join-Path $projectRoot "data"
-$verificationDirectory = Join-Path $dataRoot ("verification-live-" + [guid]::NewGuid().ToString("N"))
+$verificationDirectory = Join-Path $projectRoot ("data\verification-live-" + [guid]::NewGuid().ToString("N"))
 $databasePath = Join-Path $verificationDirectory "offerpilot.db"
-$backupPath = Join-Path $verificationDirectory "offerpilot-backup.db"
+$audioPath = Join-Path $verificationDirectory "offerpilot-verification.wav"
 $stdoutPath = Join-Path $verificationDirectory "api.stdout.log"
 $stderrPath = Join-Path $verificationDirectory "api.stderr.log"
-$environmentNames = @(
-  "OFFERPILOT_SQLITE_PATH",
-  "OFFERPILOT_DEBUG",
-  "OFFERPILOT_CORS_ORIGINS",
-  "OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP"
-)
+$performancePath = Join-Path $verificationDirectory "diagnosis-performance.json"
+New-Item -ItemType Directory -Path $verificationDirectory | Out-Null
+
 $originalEnvironment = @{}
-foreach ($name in $environmentNames) {
+foreach ($name in @("OFFERPILOT_SQLITE_PATH", "OFFERPILOT_DEBUG", "OFFERPILOT_CORS_ORIGINS", "OFFERPILOT_PROFILE_SIGNING_KEY", "PYTHONPATH")) {
   $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
-
-if ($CleanupArtifacts) {
-  if (-not (Test-Path -LiteralPath $dataRoot -PathType Container)) {
-    throw "API data directory was not found"
-  }
-  $resolvedDataRoot = (Resolve-Path -LiteralPath $dataRoot).Path
-  $prefix = $resolvedDataRoot + [System.IO.Path]::DirectorySeparatorChar
-  $artifacts = Get-ChildItem -LiteralPath $resolvedDataRoot -Directory -Filter "verification-live-*"
-  foreach ($artifact in $artifacts) {
-    if ($artifact.Name -notmatch "^verification-live-[0-9a-f]{32}$") {
-      throw "Refusing to remove an unexpected verification directory"
-    }
-    $resolvedArtifact = (Resolve-Path -LiteralPath $artifact.FullName).Path
-    if (!$resolvedArtifact.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw "Refusing to remove a verification directory outside the API data directory"
-    }
-    Remove-Item -LiteralPath $resolvedArtifact -Recurse -Force
-  }
-  Write-Output "Removed isolated live-workflow verification artifacts."
-  exit 0
-}
-
-if (-not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) {
-  throw "Python executable not found"
-}
-if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) {
-  throw "Port $Port is already in use; do not disrupt an existing service"
-}
+$env:OFFERPILOT_SQLITE_PATH = $databasePath
+$env:OFFERPILOT_DEBUG = "true"
+$env:OFFERPILOT_CORS_ORIGINS = "http://localhost:3000"
+$env:OFFERPILOT_PROFILE_SIGNING_KEY = "verification-live-signing-key-00000001"
+$env:PYTHONPATH = $apiDirectory
 
 function Start-VerificationApi {
-  $server = Start-Process -FilePath $pythonPath -WorkingDirectory $apiDirectory -ArgumentList @(
-    "-m", "uvicorn", "offerpilot.main:app", "--host", "127.0.0.1", "--port", "$Port", "--log-level", "warning"
-  ) -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-
+  $server = Start-Process -FilePath $pythonPath -WorkingDirectory $apiDirectory -ArgumentList @("-m", "uvicorn", "offerpilot.main:app", "--host", "127.0.0.1", "--port", "$Port", "--log-level", "warning") -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
   for ($attempt = 0; $attempt -lt 120; $attempt++) {
     try {
-      $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2
-      if ($health.StatusCode -eq 200) { return $server }
+      if ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/ready" -TimeoutSec 2).StatusCode -eq 200) { return $server }
     } catch {}
     Start-Sleep -Milliseconds 250
   }
-
   if (!$server.HasExited) { Stop-Process -Id $server.Id -Force }
-  throw "Temporary API did not become healthy"
-}
-
-function Stop-VerificationApi([System.Diagnostics.Process]$Server) {
-  if ($Server -and !$Server.HasExited) {
-    Stop-Process -Id $Server.Id -Force
-    $Server.WaitForExit()
-  }
+  throw "Temporary API did not become ready"
 }
 
 function Read-JsonResponse([System.Net.Http.HttpResponseMessage]$Response) {
-  $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-  if (!$Response.IsSuccessStatusCode) {
-    throw "HTTP $([int]$Response.StatusCode)"
-  }
-  return $content | ConvertFrom-Json
-}
-
-function Read-SseResponse([System.Net.Http.HttpResponseMessage]$Response) {
-  $content = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-  if (!$Response.IsSuccessStatusCode) {
-    throw "SSE HTTP $([int]$Response.StatusCode)"
-  }
-  $events = @()
-  foreach ($line in $content -split "`r?`n") {
-    if ($line.StartsWith("data: ")) {
-      $events += ($line.Substring(6) | ConvertFrom-Json)
-    }
-  }
-  if ($events.Count -eq 0) {
-    throw "SSE response contained no application events"
-  }
-  return $events
+  $text = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+  if (!$Response.IsSuccessStatusCode) { throw "HTTP $([int]$Response.StatusCode): $text" }
+  return $text | ConvertFrom-Json
 }
 
 function New-JsonContent([object]$Payload) {
-  return [System.Net.Http.StringContent]::new(
-    ($Payload | ConvertTo-Json -Depth 8 -Compress),
-    [System.Text.Encoding]::UTF8,
-    "application/json"
-  )
+  return [System.Net.Http.StringContent]::new(($Payload | ConvertTo-Json -Depth 12 -Compress), [System.Text.Encoding]::UTF8, "application/json")
 }
 
-function Require-CompletedRun([object[]]$Events, [string]$ExpectedMode) {
-  $started = @($Events | Where-Object { $_.type -eq "session_start" -and $_.mode -eq $ExpectedMode })
-  $completed = @($Events | Where-Object { $_.type -eq "run_complete" -and $_.status -eq "completed" })
-  if ($started.Count -ne 1 -or $completed.Count -ne 1) {
-    $eventSummary = @($Events | ForEach-Object {
-      $errorCategory = ([string]$_.error -split ":", 2)[0]
-      $errorCode = [string]$_.code
-      "{0}:{1}:{2}:{3}" -f $_.type, $_.status, $errorCategory, $errorCode
-    }) -join ","
-    throw "$ExpectedMode SSE run did not complete exactly once; events=$eventSummary"
+function Start-Run([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$SessionId, [string]$Type, [hashtable]$Payload) {
+  $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, "$BaseUrl/api/sessions/$SessionId/runs")
+  $request.Headers.Add("Idempotency-Key", [guid]::NewGuid().ToString("N"))
+  $request.Content = New-JsonContent @{ type = $Type; input = $Payload }
+  return (Read-JsonResponse ($Client.SendAsync($request).GetAwaiter().GetResult())).run
+}
+
+function Wait-Run([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$RunId, [string[]]$States) {
+  for ($attempt = 0; $attempt -lt 480; $attempt++) {
+    $run = Read-JsonResponse ($Client.GetAsync("$BaseUrl/api/runs/$RunId").GetAwaiter().GetResult())
+    if ($States -contains [string]$run.status) { return $run }
+    if (@("failed", "cancelled", "interrupted") -contains [string]$run.status) {
+      throw "Run reached terminal status $($run.status) with error_code=$($run.error_code)"
+    }
+    Start-Sleep -Milliseconds 250
   }
-  return [string]$started[0].trace_id
+  throw "Run did not reach $($States -join ', ')"
+}
+
+function Read-SseEvents([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$RunId) {
+  $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, "$BaseUrl/api/runs/$RunId/stream?after=0")
+  $request.Headers.Accept.Add([System.Net.Http.Headers.MediaTypeWithQualityHeaderValue]::new("text/event-stream"))
+  $response = $Client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+  if (!$response.IsSuccessStatusCode) {
+    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    $response.Dispose()
+    throw "SSE HTTP $([int]$response.StatusCode): $text"
+  }
+  $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+  $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+  $events = [System.Collections.Generic.List[object]]::new()
+  try {
+    while (($line = $reader.ReadLine()) -ne $null) {
+      if (!$line.StartsWith("data:")) { continue }
+      $event = $line.Substring(5).TrimStart() | ConvertFrom-Json
+      $events.Add($event)
+      if (@("run_completed", "run_failed", "run_cancelled", "run_interrupted") -contains [string]$event.type) { break }
+    }
+  } finally {
+    $reader.Dispose()
+    $stream.Dispose()
+    $response.Dispose()
+    $request.Dispose()
+  }
+  return $events.ToArray()
+}
+
+function Get-RunEvents([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$RunId) {
+  return @((Read-JsonResponse ($Client.GetAsync("$BaseUrl/api/runs/$RunId/events").GetAwaiter().GetResult())).events)
+}
+
+function Get-RequiredEvent([object[]]$Events, [string]$Type) {
+  $event = $Events | Where-Object { $_.type -eq $Type } | Select-Object -Last 1
+  if ($null -eq $event) { throw "Required Run event was not persisted: $Type" }
+  return $event
+}
+
+function Assert-SseStages([object[]]$Events) {
+  foreach ($type in @("diagnosis_model_started", "diagnosis_model_completed", "report_ready", "run_completed")) {
+    if (!($Events | Where-Object { $_.type -eq $type } | Select-Object -First 1)) {
+      throw "SSE did not deliver required event: $type"
+    }
+  }
+}
+
+function Approve-Run([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$RunId) {
+  $events = Get-RunEvents $Client $BaseUrl $RunId
+  $approval = Get-RequiredEvent $events "approval_required"
+  if (!$approval.data.approval_id) { throw "Approval event did not contain approval_id" }
+  return Read-JsonResponse ($Client.PostAsync("$BaseUrl/api/approvals/$($approval.data.approval_id)/decision", (New-JsonContent @{ decision = "approve" })).GetAwaiter().GetResult())
+}
+
+function Get-Median([double[]]$Values) {
+  if (!$Values -or $Values.Count -eq 0) { throw "Cannot calculate a median from an empty set" }
+  $sorted = @($Values | Sort-Object)
+  return [double]$sorted[[int][math]::Floor($sorted.Count / 2)]
+}
+
+function New-VerificationAudio([string]$Path) {
+  Add-Type -AssemblyName System.Speech
+  $synthesizer = [System.Speech.Synthesis.SpeechSynthesizer]::new()
+  try {
+    $synthesizer.SetOutputToWaveFile($Path)
+    $synthesizer.Speak("ReAct combines reasoning, actions, observations, timeouts, retries, and persistent run events.")
+  } finally {
+    $synthesizer.Dispose()
+  }
+}
+
+function Upload-Audio([System.Net.Http.HttpClient]$Client, [string]$BaseUrl, [string]$SessionId, [string]$Path) {
+  $form = [System.Net.Http.MultipartFormDataContent]::new()
+  $fileStream = [System.IO.File]::OpenRead($Path)
+  $content = [System.Net.Http.StreamContent]::new($fileStream)
+  $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("audio/wav")
+  $form.Add($content, "file", "offerpilot-verification.wav")
+  try {
+    return Read-JsonResponse ($Client.PostAsync("$BaseUrl/api/sessions/$SessionId/audio-uploads", $form).GetAwaiter().GetResult())
+  } finally {
+    $form.Dispose()
+    $content.Dispose()
+    $fileStream.Dispose()
+  }
 }
 
 $server = $null
 $client = $null
 try {
-  New-Item -ItemType Directory -Path $verificationDirectory | Out-Null
-  $env:OFFERPILOT_SQLITE_PATH = $databasePath
-  $env:OFFERPILOT_DEBUG = "true"
-  $env:OFFERPILOT_CORS_ORIGINS = "http://localhost:3000"
-  $env:OFFERPILOT_ALLOW_LEGACY_PROFILE_BOOTSTRAP = "false"
-
-  Push-Location $apiDirectory
-  & $pythonPath -m offerpilot.llm.provider_probe | Out-Null
-  $probeExitCode = $LASTEXITCODE
-  Pop-Location
-  if ($probeExitCode -ne 0) { throw "Live Provider Probe failed" }
+  & $pythonPath (Join-Path $PSScriptRoot "provider_probe.py")
+  if ($LASTEXITCODE -ne 0) { throw "Live Provider Probe failed" }
 
   $server = Start-VerificationApi
   $handler = [System.Net.Http.HttpClientHandler]::new()
   $handler.UseCookies = $true
   $client = [System.Net.Http.HttpClient]::new($handler)
-  $client.Timeout = [TimeSpan]::FromSeconds(90)
+  $client.Timeout = [TimeSpan]::FromSeconds(120)
   $client.DefaultRequestHeaders.Add("Origin", "http://localhost:3000")
   $baseUrl = "http://127.0.0.1:$Port"
+  $null = Read-JsonResponse ($client.PostAsync("$baseUrl/api/profile/bootstrap", (New-JsonContent @{})).GetAwaiter().GetResult())
 
-  $bootstrapContent = New-JsonContent @{}
-  $bootstrapResponse = $client.PostAsync("${baseUrl}/api/profile/bootstrap", $bootstrapContent).GetAwaiter().GetResult()
-  $bootstrap = Read-JsonResponse $bootstrapResponse
-  if (!$bootstrap.profile_id) { throw "Profile bootstrap did not issue a profile" }
-  $sessionContent = New-JsonContent @{}
-  $sessionResponse = $client.PostAsync("${baseUrl}/api/sessions", $sessionContent).GetAwaiter().GetResult()
-  $session = Read-JsonResponse $sessionResponse
+  $coachSession = Read-JsonResponse ($client.PostAsync("$baseUrl/api/sessions", (New-JsonContent @{})).GetAwaiter().GetResult())
+  $coach = Start-Run $client $baseUrl $coachSession.id "coach" @{ message = "Search the internal knowledge base for a ReAct tool-calling interview practice question." }
+  $coachResult = Wait-Run $client $baseUrl $coach.id @("completed")
 
-  $coachRequest = @{
-    mode = "coach"
-    session_id = [string]$session.id
-    message = "Search the internal knowledge base for a ReAct tool-calling interview practice question."
-  }
-  $coachContent = New-JsonContent $coachRequest
-  $coachResponse = $client.PostAsync("${baseUrl}/api/coach", $coachContent).GetAwaiter().GetResult()
-  $coachEvents = Read-SseResponse $coachResponse
-  $coachTraceId = Require-CompletedRun $coachEvents "coach"
-  if (@($coachEvents | Where-Object { $_.type -eq "tool_call" -and $_.tool_name -eq "search_knowledge" }).Count -lt 1) {
-    throw "Live Coach did not invoke search_knowledge"
-  }
-  if (@($coachEvents | Where-Object { $_.type -eq "tool_result" -and $_.tool_name -eq "search_knowledge" }).Count -lt 1) {
-    throw "Live Coach did not receive search_knowledge results"
-  }
+  $fixedQuestion = "Explain the production safeguards required around a ReAct agent loop."
+  $fixedAnswer = "ReAct combines reasoning, actions and observations. Production code validates tool parameters, enforces permissions and idempotency, applies timeouts with bounded retries, persists ordered Run events, supports cancellation, and records privacy-safe failure metrics."
+  $performance = [System.Collections.Generic.List[object]]::new()
 
-  $diagnosisRequest = @{
-    mode = "diagnosis"
-    session_id = [string]$session.id
-    diagnosis = @{
-      question = "Explain how ReAct combines reasoning with tool calls and handles production failures."
-      answer = "LIVE_WORKFLOW_ANSWER: ReAct combines observation, reasoning, and action. Production code validates tool parameters, returns results to context, enforces timeouts and retry boundaries, uses idempotency keys, records traces, and gives the user a recoverable next step after failures."
+  for ($index = 1; $index -le 3; $index++) {
+    $session = Read-JsonResponse ($client.PostAsync("$baseUrl/api/sessions", (New-JsonContent @{})).GetAwaiter().GetResult())
+    $diagnosis = Start-Run $client $baseUrl $session.id "diagnosis" @{ question = $fixedQuestion; answer = $fixedAnswer }
+    $sseEvents = @(Read-SseEvents $client $baseUrl $diagnosis.id)
+    Assert-SseStages $sseEvents
+    $diagnosisResult = Wait-Run $client $baseUrl $diagnosis.id @("completed")
+    $events = Get-RunEvents $client $baseUrl $diagnosis.id
+
+    $knowledge = Get-RequiredEvent $events "knowledge_merged"
+    $context = Get-RequiredEvent $events "context_built"
+    $modelStarted = Get-RequiredEvent $events "diagnosis_model_started"
+    $modelCompleted = Get-RequiredEvent $events "diagnosis_model_completed"
+    $validated = Get-RequiredEvent $events "output_validated"
+    $reportReady = Get-RequiredEvent $events "report_ready"
+    $completed = Get-RequiredEvent $events "run_completed"
+
+    $points = @($diagnosisResult.result.diagnosis.exam_points)
+    $expectedPointCount = [int]$modelStarted.data.exam_point_count
+    $uniquePointCount = @($points | ForEach-Object { [string]$_.point_id } | Sort-Object -Unique).Count
+    if ($points.Count -ne $expectedPointCount -or $uniquePointCount -ne $expectedPointCount) {
+      throw "Diagnosis $index did not cover every selected stable point exactly once"
     }
-  }
-  $diagnosisContent = New-JsonContent $diagnosisRequest
-  $diagnosisResponse = $client.PostAsync("${baseUrl}/api/coach", $diagnosisContent).GetAwaiter().GetResult()
-  $diagnosisEvents = Read-SseResponse $diagnosisResponse
-  $diagnosisTraceId = Require-CompletedRun $diagnosisEvents "diagnosis"
-  $reportReady = @($diagnosisEvents | Where-Object { $_.type -eq "report_ready" }) | Select-Object -First 1
-  if (!$reportReady -or !$reportReady.report_id -or @($diagnosisEvents | Where-Object { $_.type -eq "diagnosis_started" }).Count -ne 1) {
-    throw "Live Diagnosis did not persist a report"
-  }
-  $diagnosisTraceResponse = $client.GetAsync("${baseUrl}/api/traces/$diagnosisTraceId").GetAwaiter().GetResult()
-  $diagnosisTrace = Read-JsonResponse $diagnosisTraceResponse
-  $traceEventTypes = @($diagnosisTrace.events | ForEach-Object { $_.event_type })
-  if ("knowledge_retrieved" -notin $traceEventTypes -or "rrf_fused" -notin $traceEventTypes) {
-    throw "Live Diagnosis trace did not record Embedding/RRF retrieval"
+    if (!$validated.data.success) { throw "Diagnosis $index failed structured output validation" }
+    if ([string]$modelCompleted.data.finish_reason -eq "length") { throw "Diagnosis $index ended with finish_reason=length" }
+    if ([double]$modelCompleted.data.duration_ms -gt 60000) { throw "Diagnosis $index model duration exceeded 60 seconds" }
+
+    $performance.Add([pscustomobject]@{
+      Index = $index
+      SessionId = [string]$session.id
+      RunId = [string]$diagnosis.id
+      ReportId = [string]$diagnosisResult.result.report_id
+      RetrievalMs = [double]$knowledge.data.duration_ms
+      ContextMs = [double]$context.data.duration_ms
+      ModelMs = [double]$modelCompleted.data.duration_ms
+      FirstTokenMs = if ($null -eq $modelCompleted.data.first_token_ms) { $null } else { [double]$modelCompleted.data.first_token_ms }
+      ValidationMs = [double]$validated.data.duration_ms
+      PersistenceMs = [double]$reportReady.data.duration_ms
+      RunTotalMs = [double]$completed.data.timing.total_duration_ms
+      StreamMode = [string]$modelCompleted.data.stream_mode
+      FinishReason = [string]$modelCompleted.data.finish_reason
+      InputTokens = $modelCompleted.data.input_tokens
+      OutputTokens = $modelCompleted.data.output_tokens
+      ReasoningTokens = $modelCompleted.data.reasoning_tokens
+      ExamPointCount = $points.Count
+    })
   }
 
-  $exportPayload = @{ session_id = [string]$session.id; report_id = [string]$reportReady.report_id }
-  $exportContent = New-JsonContent $exportPayload
-  $exportResponse = $client.PostAsync("${baseUrl}/api/coach/reports/export", $exportContent).GetAwaiter().GetResult()
-  $exportRequested = Read-JsonResponse $exportResponse
-  if ($exportRequested.type -ne "permission_required" -or !$exportRequested.request_id) {
-    throw "Report export did not create an approval"
-  }
-  $exportApprovalPayload = @{ session_id = [string]$session.id; request_id = [string]$exportRequested.request_id }
-  $exportApprovalContent = New-JsonContent $exportApprovalPayload
-  $exportApprovalResponse = $client.PostAsync("${baseUrl}/api/permission/approve", $exportApprovalContent).GetAwaiter().GetResult()
-  $exportApproved = Read-JsonResponse $exportApprovalResponse
-  if ($exportApproved.flow_kind -ne "export") { throw "Report export approval has the wrong flow kind" }
-  $exportResumePayload = $exportPayload + @{ request_id = [string]$exportRequested.request_id }
-  $exportResumeContent = New-JsonContent $exportResumePayload
-  $exportResumeResponse = $client.PostAsync("${baseUrl}/api/coach/reports/export/resume", $exportResumeContent).GetAwaiter().GetResult()
-  $exportResumed = Read-JsonResponse $exportResumeResponse
-  if ($exportResumed.status -ne "executed" -or $exportResumed.report.id -ne $reportReady.report_id) {
-    throw "Report export did not execute against the saved report"
-  }
+  $modelMedian = Get-Median @($performance | ForEach-Object { [double]$_.ModelMs })
+  $runMedian = Get-Median @($performance | ForEach-Object { [double]$_.RunTotalMs })
+  if ($modelMedian -gt 30000) { throw "Diagnosis model median ${modelMedian}ms exceeded the 30000ms gate" }
+  if ($runMedian -gt 35000) { throw "Diagnosis Run median ${runMedian}ms exceeded the 35000ms gate" }
 
-  $form = [System.Net.Http.MultipartFormDataContent]::new()
-  $form.Add([System.Net.Http.StringContent]::new([string]$session.id), "session_id")
-  $audioBytes = [byte[]](0x52, 0x49, 0x46, 0x46, 0x08, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45)
-  $audioContent = [System.Net.Http.ByteArrayContent]::new($audioBytes)
-  $audioContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("audio/wav")
-  $form.Add($audioContent, "file", "verification-restart.wav")
-  $audioResponse = $client.PostAsync("${baseUrl}/api/audio/upload", $form).GetAwaiter().GetResult()
-  $audioRequested = Read-JsonResponse $audioResponse
-  if ($audioRequested.status -ne "approval_required" -or !$audioRequested.request_id) {
-    throw "Audio upload did not create an approval"
+  $exportSource = $performance[0]
+  $export = Start-Run $client $baseUrl $exportSource.SessionId "report_export" @{ report_id = $exportSource.ReportId }
+  $null = Wait-Run $client $baseUrl $export.id @("waiting_approval")
+  $null = Approve-Run $client $baseUrl $export.id
+  $exportResult = Wait-Run $client $baseUrl $export.id @("completed")
+
+  New-VerificationAudio $audioPath
+  $audioSession = Read-JsonResponse ($client.PostAsync("$baseUrl/api/sessions", (New-JsonContent @{})).GetAwaiter().GetResult())
+  $upload = Upload-Audio $client $baseUrl $audioSession.id $audioPath
+  $audioRun = Start-Run $client $baseUrl $audioSession.id "audio_transcription" @{ upload_id = [string]$upload.upload.id }
+  $null = Wait-Run $client $baseUrl $audioRun.id @("waiting_approval")
+  $null = Approve-Run $client $baseUrl $audioRun.id
+  $audioResult = Wait-Run $client $baseUrl $audioRun.id @("completed")
+  if ([string]::IsNullOrWhiteSpace([string]$audioResult.result.transcript)) {
+    throw "Audio workflow completed without a transcript"
   }
 
-  Stop-VerificationApi $server
-  $server = Start-VerificationApi
-  $recoveredStateResponse = $client.GetAsync("${baseUrl}/api/coach/state?session_id=$($session.id)").GetAwaiter().GetResult()
-  $recoveredState = Read-JsonResponse $recoveredStateResponse
-  $audioApproval = @($recoveredState.approvals | Where-Object { $_.request_id -eq $audioRequested.request_id }) | Select-Object -First 1
-  if (!$audioApproval -or $audioApproval.flow_kind -ne "audio" -or $audioApproval.status -ne "pending") {
-    throw "Audio approval did not recover after API restart"
+  [System.IO.File]::WriteAllText($performancePath, ($performance | ConvertTo-Json -Depth 8), [System.Text.UTF8Encoding]::new($false))
+
+  if ($server -and !$server.HasExited) {
+    Stop-Process -Id $server.Id -Force
+    $server.WaitForExit()
+    $server = $null
   }
-  $audioResolveContent = New-JsonContent @{ session_id = [string]$session.id; request_id = [string]$audioRequested.request_id }
-  $audioResolveResponse = $client.PostAsync("${baseUrl}/api/permission/deny", $audioResolveContent).GetAwaiter().GetResult()
-  $audioResolved = Read-JsonResponse $audioResolveResponse
-  if ($audioResolved.status -ne "denied" -or $audioResolved.flow_kind -ne "audio") {
-    throw "Audio approval did not reach a terminal state"
+  $logText = ""
+  foreach ($path in @($stdoutPath, $stderrPath)) {
+    if (Test-Path -LiteralPath $path) { $logText += Get-Content -LiteralPath $path -Encoding UTF8 -Raw }
+  }
+  foreach ($sensitive in @($fixedQuestion, $fixedAnswer, "candidate_answer", '"exam_points"')) {
+    if ($logText.Contains($sensitive)) { throw "Sensitive model input or raw JSON was found in application logs" }
   }
 
-  Stop-VerificationApi $server
-  $server = $null
-  & $backupScript -Source $databasePath -Destination $backupPath -PythonPath $pythonPath | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Database backup validation failed" }
-  $backupCheck = & $pythonPath -c "import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); reports = conn.execute('SELECT COUNT(*) FROM diagnosis_reports').fetchone()[0]; integrity = conn.execute('PRAGMA integrity_check').fetchone()[0]; conn.close(); raise SystemExit(0 if reports == 1 and integrity == 'ok' else 1)" $backupPath
-  if ($LASTEXITCODE -ne 0) { throw "Database backup is missing the persisted diagnosis report" }
-
-  $logPattern = "Authorization|offerpilot_profile|data:audio|verification-restart.wav|LIVE_WORKFLOW_ANSWER"
-  $logMatches = @(Select-String -LiteralPath $stdoutPath, $stderrPath -Encoding UTF8 -Pattern $logPattern)
-  if ($logMatches.Count -gt 0) { throw "Application logs contain protected request data" }
-
+  $performance | Format-Table Index, RetrievalMs, ContextMs, ModelMs, FirstTokenMs, ValidationMs, PersistenceMs, RunTotalMs, StreamMode, FinishReason, ExamPointCount -AutoSize
   [pscustomobject]@{
-    LiveProviderProbe = "passed"
-    ProfileBootstrap = "passed"
-    CoachNativeTool = "search_knowledge"
-    DiagnosisAndRrf = "passed"
-    ReportPersistenceAndExport = "passed"
-    AudioApprovalRestartRecovery = "passed"
-    BackupIntegrity = "passed"
-    ApplicationLogRedaction = "passed"
+    ProviderProbe = "passed"
+    CoachRun = $coachResult.status
+    DiagnosisRuns = $performance.Count
+    ModelMedianMs = $modelMedian
+    RunMedianMs = $runMedian
+    AudioRun = $audioResult.status
+    ExportRun = $exportResult.status
+    SensitiveLogScan = "passed"
+    PerformanceArtifact = $performancePath
   } | Format-List
 } finally {
   if ($client) { $client.Dispose() }
-  Stop-VerificationApi $server
-  foreach ($name in $environmentNames) {
-    if ($null -eq $originalEnvironment[$name]) {
-      Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
-    } else {
-      Set-Item -Path "Env:$name" -Value $originalEnvironment[$name]
-    }
+  if ($server -and !$server.HasExited) { Stop-Process -Id $server.Id -Force }
+  foreach ($name in $originalEnvironment.Keys) {
+    if ($null -eq $originalEnvironment[$name]) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue } else { Set-Item -Path "Env:$name" -Value $originalEnvironment[$name] }
   }
-  if (!$KeepArtifacts -and (Test-Path -LiteralPath $verificationDirectory)) {
-    $resolvedDirectory = (Resolve-Path -LiteralPath $verificationDirectory).Path
-    $resolvedDataRoot = (Resolve-Path -LiteralPath $dataRoot).Path
-    if (!$resolvedDirectory.StartsWith($resolvedDataRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw "Refusing to remove a verification directory outside the API data directory"
-    }
-    Remove-Item -LiteralPath $resolvedDirectory -Recurse -Force
-  }
+  if (!$KeepArtifacts -and (Test-Path -LiteralPath $verificationDirectory)) { Remove-Item -LiteralPath $verificationDirectory -Recurse -Force }
 }

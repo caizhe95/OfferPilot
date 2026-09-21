@@ -1,135 +1,96 @@
-"""Deterministic, evidence-grounded diagnosis composite tool."""
+"""Formal diagnosis orchestration and durable diagnostic stage events."""
 
 from __future__ import annotations
 
 import asyncio
+import math
+from time import perf_counter
 from typing import Any
 
-from offerpilot.core.deadline import RunDeadlineExceeded, await_with_deadline, deadline_after, raise_if_cancelled, require_remaining
+from offerpilot.core.deadlines import RunDeadlineExceeded, await_with_deadline, deadline_after, raise_if_cancelled, require_remaining
 from offerpilot.core.errors import AppError
 from offerpilot.diagnosis.context_builder import build_context
-from offerpilot.diagnosis.diagnosis import diagnose_interview, persist_completed_diagnosis
-from offerpilot.knowledge.knowledge_importer import search_knowledge_safe_async
-from offerpilot.trace.trace_eval import add_trace_event
-from offerpilot.harness.harness import HarnessRunner
+from offerpilot.diagnosis.reporting import build_report, render_and_validate
+from offerpilot.diagnosis.repository import save_report
+from offerpilot.diagnosis.scoring import build_deterministic_followups, diagnose_interview, select_scorable_points
+from offerpilot.knowledge.retrieval import search_knowledge
+from offerpilot.llm.structured import LLMInvalidResponseError, LLMOutputTruncatedError
+from offerpilot.runs.events import notify
+from offerpilot.runs.repository import append_event
+
+DIAGNOSIS_RUN_TIMEOUT_SECONDS = 45.0
 
 
-def _looks_corrupted_text(text: str) -> bool:
-    """Reject text that has been replaced mostly by encoding placeholders."""
+def _emit(run_id: str, event_type: str, data: dict[str, Any]) -> None:
+    append_event(run_id, event_type, data)
+    notify(run_id)
+
+
+def looks_corrupted_text(text: str) -> bool:
     visible = [character for character in text if not character.isspace()]
-    if not visible:
-        return False
-    placeholder_count = sum(character in {"?", "\ufffd"} for character in visible)
-    return placeholder_count / len(visible) >= 0.4
+    return bool(visible) and sum(character in {"?", "\ufffd"} for character in visible) / len(visible) >= 0.4
 
 
-async def run_diagnosis(
-    *,
-    session_id: str,
-    profile_id: str,
-    trace_id: str,
-    question: str,
-    answer: str,
-    timeout: float,
-    cancel_event: Any | None = None,
-    deadline: float | None = None,
-) -> dict[str, Any]:
-    """Run the only formal scoring path: retrieval, one score call, validation and persistence."""
+def calculate_overall_score(content_scores: dict[str, Any], voice_scores: dict[str, Any]) -> float:
+    """Calculate the combined score while rejecting malformed score contracts."""
+    total = 0.0
+    for name, scores in (("content", content_scores), ("voice", voice_scores)):
+        dimension_total = scores.get("total")
+        max_total = scores.get("max_total")
+        if (
+            isinstance(dimension_total, bool)
+            or not isinstance(dimension_total, (int, float))
+            or isinstance(max_total, bool)
+            or not isinstance(max_total, (int, float))
+            or max_total <= 0
+            or not math.isfinite(float(dimension_total))
+            or not math.isfinite(float(max_total))
+        ):
+            raise AppError(f"{name} score contract is invalid", code="invalid_diagnosis_score", status_code=503)
+        total += float(dimension_total) / float(max_total) * 5
+    return round(total, 1)
+
+
+async def run_diagnosis(*, run_id: str, session_id: str, profile_id: str, question: str, answer: str, timeout: float, cancel_event: asyncio.Event | None = None) -> dict[str, Any]:
     if not question.strip() or not answer.strip():
         raise AppError("question and answer are required", code="invalid_diagnosis_input", status_code=422)
-    if _looks_corrupted_text(question) or _looks_corrupted_text(answer):
-        raise AppError(
-            "question or answer appears corrupted; please submit the original text again",
-            code="invalid_diagnosis_input",
-            status_code=422,
-        )
-    run_deadline = min(deadline or float("inf"), deadline_after(min(45.0, max(0.001, timeout))))
+    if looks_corrupted_text(question) or looks_corrupted_text(answer):
+        raise AppError("question or answer appears corrupted; please submit the original text again", code="invalid_diagnosis_input", status_code=422)
+    deadline = deadline_after(min(DIAGNOSIS_RUN_TIMEOUT_SECONDS, max(0.001, timeout)))
     try:
-        async with asyncio.timeout(require_remaining(run_deadline)):
+        async with asyncio.timeout(require_remaining(deadline)):
             raise_if_cancelled(cancel_event)
-            knowledge = await search_knowledge_safe_async(
-                question=question,
-                answer=answer,
-                limit=5,
-                trace_id=trace_id,
-                cancel_event=cancel_event,
-                deadline=run_deadline,
-            )
-            add_trace_event(trace_id, "knowledge_retrieved", 1, {"count": len(knowledge)})
-            add_trace_event(trace_id, "rrf_fused", 1, {"knowledge_ids": [item.get("id") for item in knowledge]})
-            context = await await_with_deadline(
-                asyncio.to_thread(
-                    build_context,
-                    session_id=session_id,
-                    profile_id=profile_id,
-                    user_input=f"面试题：{question}\n回答：{answer}",
-                    knowledge_results=knowledge,
-                ),
-                deadline=run_deadline,
-                cancel_event=cancel_event,
-            )
-            diagnosis = await diagnose_interview(
-                session_id=session_id,
-                profile_id=profile_id,
-                question=question,
-                answer=answer,
-                knowledge_context=knowledge,
-                context_instruction=context,
-                timeout=require_remaining(run_deadline),
-                cancel_event=cancel_event,
-                deadline=run_deadline,
-            )
-            content = diagnosis["content_scores"]
-            voice = diagnosis["voice_scores"]
-            overall = round(((content["total"] / content["max_total"]) * 5 + (voice["total"] / voice["max_total"]) * 5), 1)
-            report_input = _report_structure(question, answer, diagnosis, overall, knowledge)
-            report, output_check = HarnessRunner(session_id).post_output(report_input)
-            if not output_check.get("valid"):
-                add_trace_event(trace_id, "output_check", 3, {"result": "failed", "issues": output_check.get("issues", [])})
+            _emit(run_id, "diagnosis_started", {})
+            started = perf_counter()
+            knowledge = await search_knowledge(question=question, answer=answer, limit=5, cancel_event=cancel_event, deadline=deadline)
+            _emit(run_id, "knowledge_merged", {"fts_count": sum(bool(item.get("fts_rank")) for item in knowledge), "vector_count": sum(bool(item.get("vector_rank")) for item in knowledge), "count": len(knowledge), "embedding_unavailable": any(item.get("embedding_unavailable") for item in knowledge), "duration_ms": max(0, int((perf_counter() - started) * 1000))})
+            points = select_scorable_points(knowledge)
+            if not points: raise AppError("No stable exam points were recalled", code="no_reference_exam_points", status_code=503)
+            started = perf_counter()
+            context = await await_with_deadline(asyncio.to_thread(build_context, session_id=session_id, profile_id=profile_id, user_input=f"面试题：{question}\n回答：{answer}", knowledge_results=knowledge, max_chars=24000), deadline=deadline, cancel_event=cancel_event)
+            _emit(run_id, "context_built", {"duration_ms": max(0, int((perf_counter() - started) * 1000)), "context_chars": len(context)})
+            _emit(run_id, "diagnosis_model_started", {"exam_point_count": len(points)})
+            try:
+                diagnosis = await diagnose_interview(question=question, answer=answer, scorable_points=points, context_instruction=context, timeout=require_remaining(deadline), cancel_event=cancel_event, deadline=deadline, on_progress=lambda data: _emit(run_id, "diagnosis_model_progress", data), on_fallback=lambda data: _emit(run_id, "diagnosis_model_fallback", data))
+            except (LLMInvalidResponseError, LLMOutputTruncatedError) as exc:
+                metrics = dict(getattr(exc, "metrics", {}) or {})
+                if metrics: _emit(run_id, "diagnosis_model_completed", metrics)
+                _emit(run_id, "output_validated", {"success": False, "duration_ms": int(getattr(exc, "validation_duration_ms", 0) or 0), "error_code": exc.code})
+                raise
+            metrics = dict(diagnosis.pop("_llm_metrics", {}) or {})
+            _emit(run_id, "diagnosis_model_completed", metrics)
+            _emit(run_id, "output_validated", {"success": True, "duration_ms": int(diagnosis.pop("_validation_duration_ms", 0) or 0)})
+            diagnosis["followups"] = build_deterministic_followups(diagnosis, knowledge)
+            content, voice = diagnosis["content_scores"], diagnosis["voice_scores"]
+            overall = calculate_overall_score(content, voice)
+            markdown, output = render_and_validate(build_report(question, answer, diagnosis, overall, knowledge))
+            if not output["valid"]:
+                _emit(run_id, "output_check", {"result": "failed", "issues": output["issues"]})
                 raise AppError("Diagnosis report failed output validation", code="output_check_failed", status_code=503)
+            started = perf_counter()
             raise_if_cancelled(cancel_event)
-            sources = [str(item.get("source", item.get("title", "")))[:300] for item in knowledge]
-            saved = persist_completed_diagnosis(
-                session_id=session_id,
-                profile_id=profile_id,
-                trace_id=trace_id,
-                question=question,
-                answer=answer,
-                content_scores=content,
-                voice_scores=voice,
-                overall_score=overall,
-                report_markdown=report,
-                diagnosis=diagnosis,
-                sources=sources,
-            )
-            if saved is None:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise asyncio.CancelledError()
-                raise AppError("Diagnosis run is no longer active", code="diagnosis_not_active", status_code=409)
-            return {
-                "report_id": saved["id"],
-                "overall_score": overall,
-                "report": report,
-                "diagnosis": diagnosis,
-                "followups": diagnosis["followups"],
-                "memory_candidates": diagnosis["memory_candidates"],
-                "sources": sources,
-            }
-    except asyncio.CancelledError:
-        raise
-    except (RunDeadlineExceeded, TimeoutError) as exc:
-        raise AppError("diagnosis timeout", code="diagnosis_timeout", status_code=504) from exc
-
-
-def _report_structure(question: str, answer: str, diagnosis: dict[str, Any], overall: float, knowledge: list[dict[str, Any]]) -> dict[str, Any]:
-    points = diagnosis["exam_points"]
-    return {
-        "question": question, "answer": answer, "overall_score": overall,
-        "content_scores": diagnosis["content_scores"], "voice_scores": diagnosis["voice_scores"],
-        "followups": diagnosis["followups"], "sources": [item.get("source", item.get("title", "")) for item in knowledge],
-        "exam_points": points,
-        "user_covered": [item for item in points if item["status"] == "covered"],
-        "user_missing": [item for item in points if item["status"] != "covered"],
-        "improvements": diagnosis["improvements"] or ["请补充具体工程场景和边界条件。"],
-        "reference_alignment": "\n".join(f"- {item.get('title', '')}" for item in knowledge[:5]) or "- 未命中参考资料",
-    }
+            saved = save_report(run_id=run_id, session_id=session_id, profile_id=profile_id, question=question, answer=answer, diagnosis=diagnosis, markdown=markdown, overall_score=overall, knowledge=knowledge)
+            _emit(run_id, "report_ready", {"report_id": saved["report_id"], "overall_score": saved["overall_score"], "source_count": len(saved["sources"]), "duration_ms": max(0, int((perf_counter() - started) * 1000))})
+            return saved
+    except asyncio.CancelledError: raise
+    except (RunDeadlineExceeded, TimeoutError) as exc: raise AppError("diagnosis timeout", code="diagnosis_timeout", status_code=504) from exc

@@ -1,107 +1,93 @@
-"""Context builder for the fixed single-question diagnosis workflow."""
+"""Priority-aware context construction."""
 
-from offerpilot.diagnosis.diagnosis import get_memories
-from offerpilot.harness.harness import load_diagnosis_rules
-from offerpilot.session.session import get_recent_messages
+from __future__ import annotations
+
+from offerpilot.diagnosis.reporting import load_diagnosis_rules
+from offerpilot.profiles.memory_repository import get_memories
+from offerpilot.sessions.repository import get_messages
+from offerpilot.sessions.summaries import get_session_summary
 
 
-def build_context(
-    session_id: str,
-    profile_id: str,
-    user_input: str,
-    knowledge_results: list[dict] | None = None,
-    max_chars: int = 8000,
-    recent_n: int = 10,
-) -> str:
-    """Assemble the instruction actually sent to the one diagnosis call."""
-    layers: list[tuple[str, str]] = [
-        ("system", _build_system_prompt()),
-        ("rules", load_diagnosis_rules()),
+def build_context(session_id: str, profile_id: str, user_input: str, knowledge_results: list[dict] | None = None, max_chars: int = 24000, recent_n: int = 12) -> str:
+    layers: list[tuple[str, str, bool]] = [
+        ("system", _build_system_prompt(), True),
+        ("rules", load_diagnosis_rules(), True),
+        ("input", user_input, True),
+        ("knowledge", _format_knowledge(knowledge_results or []), False),
+        ("summary", _summary_context(session_id), False),
+        ("memory", _memory_context(profile_id), False),
+        ("history", _history_context(session_id, recent_n), False),
     ]
+    def header(name: str) -> str:
+        return f"\n<!-- {name.upper()} -->\n"
 
-    memory = _build_memory_context(profile_id)
-    if memory:
-        layers.append(("memory", memory))
-
-    recent = get_recent_messages(session_id, n=recent_n)
-    if recent:
-        layers.append(("history", "\n".join(f"[{m['role']}]: {m['content']}" for m in recent)))
-
-    if knowledge_results:
-        layers.append(("knowledge", _format_knowledge(knowledge_results)))
-    layers.append(("input", user_input))
-
+    truncated_suffix = "\n...(truncated)"
+    reserved = sum(len(header(name)) + len(content) for name, content, required in layers if required and content)
+    if reserved > max_chars:
+        raise ValueError("required_context_over_budget")
+    remaining = max_chars - reserved
     parts: list[str] = []
-    total_chars = 0
-    for name, content in layers:
+    for name, content, required in layers:
         if not content:
             continue
-        header = f"\n<!-- {name.upper()} -->\n"
-        remaining = max_chars - total_chars - len(header)
-        if remaining <= 100:
-            break
-        if len(content) > remaining:
-            content = content[:remaining] + "\n...(truncated)"
-        parts.append(header + content)
-        total_chars += len(header) + len(content)
-
-    assembled = "\n".join(parts)
-    input_marker = f"\n<!-- INPUT -->\n{user_input}"
+        if required:
+            bounded = content
+            suffix = ""
+        else:
+            section_header = header(name)
+            full_length = len(section_header) + len(content)
+            if full_length <= remaining:
+                bounded = content
+                suffix = ""
+            elif remaining > len(section_header) + len(truncated_suffix):
+                content_length = remaining - len(section_header) - len(truncated_suffix)
+                bounded = content[:content_length]
+                suffix = truncated_suffix
+            else:
+                continue
+            remaining -= len(section_header) + len(bounded) + len(suffix)
+        parts.append(header(name) + bounded + suffix)
+    assembled = "".join(parts)
     if user_input not in assembled:
-        assembled = assembled[: max(0, max_chars - len(input_marker))] + input_marker
+        raise ValueError("required_context_over_budget")
     return assembled
 
 
 def _build_system_prompt() -> str:
     return """You are an expert Chinese AI Agent / LLM engineering interview evaluator.
-
-你不是知识库问答助手。
-你的任务仅限于处理“面试题 + 候选人回答”的诊断，不处理开放域知识问答。
-Reference Answers 只用于对标候选人回答，不用于回答知识问题。
-
-Guidelines:
-- Be specific and actionable in your feedback.
-- Follow the supplied diagnosis rules and structured output contract.
-- Do not invent sources or claim knowledge not in the provided knowledge base.
-- Always output in Chinese (Simplified).
-- Keep responses under 2500 characters."""
+你只处理“面试题 + 候选人回答”的正式诊断，不处理开放域知识问答。
+历史 Summary、批准 Memory 和最近消息只能作为练习背景，不能作为当前回答的评分证据。
+正式评分只能依据当前回答、当前题目、程序化表达特征和检索到的参考考点。
+Always output in Simplified Chinese and follow the structured output contract."""
 
 
-def _build_memory_context(profile_id: str) -> str:
-    """Build a bounded summary from approved memories of one profile."""
-    weaknesses = get_memories(profile_id=profile_id, key="weakness")
-    strengths = get_memories(profile_id=profile_id, key="strength")
-    target_roles = get_memories(profile_id=profile_id, key="target_role")
-    preferences = get_memories(profile_id=profile_id, key="preference")
-    if not weaknesses and not strengths and not target_roles and not preferences:
+def _history_context(session_id: str, recent_n: int) -> str:
+    messages = get_messages(session_id, n=recent_n)
+    return "\n".join(f"[{item['role']}]: {item['content']}" for item in messages)
+
+
+def _memory_context(profile_id: str) -> str:
+    memories = get_memories(profile_id)
+    if not memories:
         return ""
+    return "## Approved Practice Memory\n" + "\n".join(f"- [{item['key']}] {item['value']}" for item in memories[:12])
 
-    parts = ["## Approved Practice Memory"]
-    for item in weaknesses[:5]:
-        parts.append(f"- [weakness] {item['value']}")
-    for item in strengths[:3]:
-        parts.append(f"- [strength] {item['value']}")
-    for item in target_roles[:3]:
-        parts.append(f"- [target role] {item['value']}")
-    for item in preferences[:3]:
-        parts.append(f"- [preference] {item['value']}")
-    return "\n".join(parts)[:800]
+
+def _summary_context(session_id: str) -> str:
+    summary = get_session_summary(session_id)
+    if not summary:
+        return ""
+    return "## Session Historical Summary (not scoring evidence)\n" + str(summary.get("summary_json", summary))
 
 
 def _format_knowledge(results: list[dict]) -> str:
-    """Format fused interview references as evidence, not QA material."""
-    refs = [r for r in results[:5] if r.get("kind") == "interview_qa"]
-    coaching = [r for r in results[:5] if r.get("kind") == "coaching_doc"]
     parts = ["## Reference Answers"]
-    for index, item in enumerate(refs, 1):
+    for index, item in enumerate([item for item in results[:5] if item.get("kind") == "interview_qa"], 1):
         parts.append(f"### {index}. {item.get('title', '')}")
         parts.append(f"Question: {item.get('question', '')}")
-        expert = str(item.get("expert_answer") or item.get("content") or "")
-        parts.append(f"Expert Answer:\n{expert[:900]}")
-        points = item.get("exam_points") or []
+        parts.append(f"Expert Answer:\n{str(item.get('expert_answer') or item.get('content') or '')[:1200]}")
+        points = item.get("exam_point_refs") or []
         if points:
-            parts.append("Exam Points:\n" + "\n".join(f"- {point}" for point in points[:6]))
+            parts.append("Exam Points:\n" + "\n".join(f"- [{point.get('id', '')}] {point.get('label', '')}" for point in points[:8]))
         parts.append(f"Source: {item.get('source', '')}")
-    for index, item in enumerate(coaching[:2], 1):
-        parts.append(f"### Coaching Note {index}: {item.get('title', '')}\n{str(item.get('content', ''))[:700]}")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts) if len(parts) > 1 else ""

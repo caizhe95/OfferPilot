@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +16,7 @@ os.environ["OFFERPILOT_SQLITE_PATH"] = "./data/test_offerpilot.db"
 import sys
 from pathlib import Path
 _project_root = Path(__file__).resolve().parents[2]
-_knowledge_dir = _project_root / "knowledge"
+_knowledge_dir = _project_root / "resources" / "knowledge"
 os.environ["OFFERPILOT_KNOWLEDGE_DIR"] = str(_knowledge_dir)
 
 
@@ -122,44 +123,33 @@ def fake_structured_llm(monkeypatch):
             }
         }
 
-    def _followups(question: str, answer: str) -> dict:
-        base = question or "这个问题"
-        return {
-            "followups": [
-                {"question": f"请补充说明 {base} 的工程实现细节。", "why": "确认工程落地能力"},
-                {"question": f"你在 {base} 中遇到过哪些边界情况？", "why": "检查实际经验"},
-            ]
-        }
-
-    def _memory_candidates(question: str, answer: str, report: str) -> dict:
-        text = f"{question}\n{answer}\n{report}".strip()
-        candidates = []
-        if text:
-            candidates.append({"key": "weakness", "value": "需要补充工程细节", "category": "diagnosis"})
-            candidates.append({"key": "diagnosis_summary", "value": "本次诊断已完成", "category": "diagnosis"})
-        return {"candidates": candidates}
-
-    def _diagnosis(question: str, answer: str) -> dict:
+    def _diagnosis(question: str, answer: str, scorable_points: list[dict]) -> dict:
         evidence = (answer or "").strip()[:80]
         content = _content_dimensions(question, answer)["dimensions"]
         voice = _voice_dimensions(answer)["dimensions"]
+        points = scorable_points or [{"id": "test-default-point", "label": "围绕题目说明核心概念"}]
         return {
-            "exam_points": [{
-                "point": "围绕题目说明核心概念",
-                "status": "covered" if evidence else "missing",
-                "evidence": evidence or None,
-                "explanation": "回答已提供可核验的表述" if evidence else "回答未提供有效内容",
-            }],
+            "exam_points": [
+                {
+                    "point_id": point["id"],
+                    "status": "covered" if evidence else "missing",
+                    "evidence": evidence or None,
+                    "explanation": "回答已提供可核验的表述" if evidence else "回答未提供有效内容",
+                }
+                for point in points
+            ],
             "content_dimensions": content,
             "voice_dimensions": voice,
             "improvements": ["补充具体工程场景和边界条件。"],
-            "followups": _followups(question, answer)["followups"],
-            "memory_candidates": _memory_candidates(question, answer, "")["candidates"],
         }
 
     def fake_structured_json_completion(*, task_name: str, user_payload: dict, **kwargs):
         if task_name == "interview_diagnosis":
-            data = _diagnosis(str(user_payload.get("question", "")), str(user_payload.get("candidate_answer", "")))
+            data = _diagnosis(
+                str(user_payload.get("question", "")),
+                str(user_payload.get("candidate_answer", "")),
+                list(user_payload.get("scorable_exam_points") or []),
+            )
         else:
             data = {}
 
@@ -171,33 +161,42 @@ def fake_structured_llm(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "offerpilot.diagnosis.diagnosis.structured_json_completion",
+        "offerpilot.diagnosis.scoring.structured_json_completion",
         fake_structured_json_completion,
         raising=True,
     )
 
 @pytest.fixture(autouse=True)
 def clean_db():
-    """Clean up test database before each test."""
+    """Clean up the Windows SQLite test file, tolerating brief close races."""
     from offerpilot.core.config import settings
 
     db_path = settings.db_path
-    if db_path.exists():
-        db_path.unlink(missing_ok=True)
+    _delete_test_database(db_path)
     yield
-    if db_path.exists():
-        db_path.unlink(missing_ok=True)
+    _delete_test_database(db_path)
+
+
+def _delete_test_database(db_path: Path) -> None:
+    for attempt in range(10):
+        try:
+            db_path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 @pytest.fixture
 def client():
     """Create a test client."""
     from offerpilot.main import app
-    from offerpilot.core.database import init_db
+    from offerpilot.database.connection import init_db
 
     init_db()
     with TestClient(app) as client:
-        from offerpilot.core.profile import PROFILE_COOKIE, make_profile_cookie
+        from offerpilot.profiles.cookies import PROFILE_COOKIE, make_profile_cookie
 
         profile_id = "00000000-0000-4000-8000-000000000001"
         client.cookies.set(PROFILE_COOKIE, make_profile_cookie(profile_id))

@@ -1,6 +1,4 @@
-param(
-  [int]$Port = 8010
-)
+param([int]$Port = 8010)
 
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Net.Http
@@ -11,6 +9,10 @@ $verificationDirectory = Join-Path $projectRoot ("data\verification-restart-" + 
 $databasePath = Join-Path $verificationDirectory "offerpilot.db"
 New-Item -ItemType Directory -Path $verificationDirectory | Out-Null
 
+$originalEnvironment = @{}
+foreach ($name in @("OFFERPILOT_SQLITE_PATH", "OFFERPILOT_DEBUG", "OFFERPILOT_REQUIRE_EMBEDDING", "OFFERPILOT_PROFILE_SIGNING_KEY", "MIMO_API_KEY", "OFFERPILOT_CORS_ORIGINS")) {
+  $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+}
 $env:OFFERPILOT_SQLITE_PATH = $databasePath
 $env:OFFERPILOT_DEBUG = "true"
 $env:OFFERPILOT_REQUIRE_EMBEDDING = "false"
@@ -19,26 +21,32 @@ $env:MIMO_API_KEY = ""
 $env:OFFERPILOT_CORS_ORIGINS = "http://localhost:3000"
 
 function Start-VerificationApi {
-  $server = Start-Process -FilePath $pythonPath -WorkingDirectory $apiDirectory -ArgumentList @(
-    "-m", "uvicorn", "offerpilot.main:app", "--host", "127.0.0.1", "--port", "$Port", "--log-level", "warning"
-  ) -WindowStyle Hidden -PassThru
-
+  $server = Start-Process -FilePath $pythonPath -WorkingDirectory $apiDirectory -ArgumentList @("-m", "uvicorn", "offerpilot.main:app", "--host", "127.0.0.1", "--port", "$Port", "--log-level", "warning") -WindowStyle Hidden -PassThru
   for ($attempt = 0; $attempt -lt 80; $attempt++) {
-    try {
-      $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2
-      if ($health.StatusCode -eq 200) { return $server }
-    } catch {}
+    try { if ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$Port/ready" -TimeoutSec 2).StatusCode -eq 200) { return $server } } catch {}
     Start-Sleep -Milliseconds 250
   }
-
   if (!$server.HasExited) { Stop-Process -Id $server.Id -Force }
-  throw "Temporary API did not become healthy"
+  throw "Temporary API did not become ready"
 }
 
-function Read-JsonResponse([System.Net.Http.HttpResponseMessage]$response) {
-  $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-  if (!$response.IsSuccessStatusCode) { throw "HTTP $([int]$response.StatusCode): $text" }
+function Read-JsonResponse([System.Net.Http.HttpResponseMessage]$Response) {
+  $text = $Response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+  if (!$Response.IsSuccessStatusCode) { throw "HTTP $([int]$Response.StatusCode): $text" }
   return $text | ConvertFrom-Json
+}
+
+function New-JsonContent([object]$Payload) {
+  return [System.Net.Http.StringContent]::new(($Payload | ConvertTo-Json -Depth 8 -Compress), [System.Text.Encoding]::UTF8, "application/json")
+}
+
+function Wait-Run([System.Net.Http.HttpClient]$Client, [string]$RunId, [string[]]$ExpectedStates) {
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    $run = Read-JsonResponse ($Client.GetAsync("http://127.0.0.1:$Port/api/runs/$RunId").GetAwaiter().GetResult())
+    if ($ExpectedStates -contains [string]$run.status) { return $run }
+    Start-Sleep -Milliseconds 100
+  }
+  throw "Run did not reach one of: $($ExpectedStates -join ', ')"
 }
 
 $server = $null
@@ -49,45 +57,35 @@ try {
   $handler.UseCookies = $true
   $client = [System.Net.Http.HttpClient]::new($handler)
   $client.DefaultRequestHeaders.Add("Origin", "http://localhost:3000")
-
-  $bootstrapContent = [System.Net.Http.StringContent]::new("{}", [System.Text.Encoding]::UTF8, "application/json")
-  $bootstrap = Read-JsonResponse ($client.PostAsync("http://127.0.0.1:$Port/api/profile/bootstrap", $bootstrapContent).GetAwaiter().GetResult())
-  $sessionContent = [System.Net.Http.StringContent]::new("{}", [System.Text.Encoding]::UTF8, "application/json")
-  $session = Read-JsonResponse ($client.PostAsync("http://127.0.0.1:$Port/api/sessions", $sessionContent).GetAwaiter().GetResult())
+  $baseUrl = "http://127.0.0.1:$Port"
+  $null = Read-JsonResponse ($client.PostAsync("$baseUrl/api/profile/bootstrap", (New-JsonContent @{})).GetAwaiter().GetResult())
+  $session = Read-JsonResponse ($client.PostAsync("$baseUrl/api/sessions", (New-JsonContent @{})).GetAwaiter().GetResult())
 
   $form = [System.Net.Http.MultipartFormDataContent]::new()
-  $form.Add([System.Net.Http.StringContent]::new([string]$session.id), "session_id")
-  $audioContent = [System.Net.Http.ByteArrayContent]::new([byte[]](0x52, 0x49, 0x46, 0x46, 0x08, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45))
-  $audioContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("audio/wav")
-  $form.Add($audioContent, "file", "restart-check.wav")
-  $upload = Read-JsonResponse ($client.PostAsync("http://127.0.0.1:$Port/api/audio/upload", $form).GetAwaiter().GetResult())
-  if ($upload.status -ne "approval_required" -or !$upload.request_id) { throw "Audio upload did not create an approval" }
+  $audio = [System.Net.Http.ByteArrayContent]::new([byte[]](0x52, 0x49, 0x46, 0x46, 0x08, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45))
+  $audio.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("audio/wav")
+  $form.Add($audio, "file", "restart-check.wav")
+  $upload = Read-JsonResponse ($client.PostAsync("$baseUrl/api/sessions/$($session.id)/audio-uploads", $form).GetAwaiter().GetResult())
+  $runRequest = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, "$baseUrl/api/sessions/$($session.id)/runs")
+  $runRequest.Headers.Add("Idempotency-Key", "restart-audio-run")
+  $runRequest.Content = New-JsonContent @{ type = "audio_transcription"; input = @{ upload_id = [string]$upload.upload.id } }
+  $run = (Read-JsonResponse ($client.SendAsync($runRequest).GetAwaiter().GetResult())).run
+  $null = Wait-Run $client $run.id @("waiting_approval")
 
   Stop-Process -Id $server.Id -Force
   $server.WaitForExit()
   $server = Start-VerificationApi
-
-  $stateResponse = Read-JsonResponse ($client.GetAsync("http://127.0.0.1:$Port/api/coach/state?session_id=$($session.id)").GetAwaiter().GetResult())
-  $approval = @($stateResponse.approvals | Where-Object { $_.request_id -eq $upload.request_id }) | Select-Object -First 1
-  if (!$approval -or $approval.flow_kind -ne "audio" -or $approval.status -ne "pending") {
-    throw "Approval was not recovered after API restart"
-  }
-
-  $approvalPayload = @{ request_id = $upload.request_id; session_id = $session.id } | ConvertTo-Json -Compress
-  $approveBody = [System.Net.Http.StringContent]::new($approvalPayload, [System.Text.Encoding]::UTF8, "application/json")
-  $approved = Read-JsonResponse ($client.PostAsync("http://127.0.0.1:$Port/api/permission/approve", $approveBody).GetAwaiter().GetResult())
-  $resumeBody = [System.Net.Http.StringContent]::new($approvalPayload, [System.Text.Encoding]::UTF8, "application/json")
-  $resumed = Read-JsonResponse ($client.PostAsync("http://127.0.0.1:$Port/api/audio/resume", $resumeBody).GetAwaiter().GetResult())
-  if ($resumed.status -notin @("transcribed", "asr_failed")) { throw "Recovered approval did not reach an Audio terminal result" }
-
-  [pscustomobject]@{
-    Bootstrap = "ok"
-    UploadApproval = $upload.status
-    RestartRecoveredApproval = $approval.status
-    ResumeStatus = $resumed.status
-  } | Format-List
+  $events = (Read-JsonResponse ($client.GetAsync("$baseUrl/api/runs/$($run.id)/events").GetAwaiter().GetResult())).events
+  $approvalEvent = @($events | Where-Object { $_.type -eq "approval_required" } | Select-Object -Last 1)
+  if (!$approvalEvent -or !$approvalEvent.data.approval_id) { throw "Approval event was not recovered" }
+  $approved = Read-JsonResponse ($client.PostAsync("$baseUrl/api/approvals/$($approvalEvent.data.approval_id)/decision", (New-JsonContent @{ decision = "approve" })).GetAwaiter().GetResult())
+  $terminal = Wait-Run $client $run.id @("completed", "failed")
+  [pscustomobject]@{ Session = $session.id; Run = $run.id; ApprovalRecovered = $approvalEvent.data.approval_id; TerminalStatus = $terminal.status; ApprovalStatus = $approved.approval.status } | Format-List
 } finally {
   if ($client) { $client.Dispose() }
   if ($server -and !$server.HasExited) { Stop-Process -Id $server.Id -Force }
+  foreach ($name in $originalEnvironment.Keys) {
+    if ($null -eq $originalEnvironment[$name]) { Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue } else { Set-Item -Path "Env:$name" -Value $originalEnvironment[$name] }
+  }
   if (Test-Path -LiteralPath $verificationDirectory) { Remove-Item -LiteralPath $verificationDirectory -Recurse -Force }
 }

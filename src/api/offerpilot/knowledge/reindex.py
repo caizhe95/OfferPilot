@@ -2,8 +2,8 @@
 
 import asyncio
 
-from offerpilot.core.database import init_db
-from offerpilot.knowledge.knowledge_importer import import_knowledge_with_stats_async
+from offerpilot.database.connection import init_db
+from offerpilot.knowledge.indexer import import_knowledge_with_stats_async
 
 
 def main() -> None:
