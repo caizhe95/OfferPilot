@@ -4,7 +4,7 @@ import { bootstrapProfile } from "../lib/profile";
 import { createReportExport, createRun, requestJson, uploadAudio } from "../lib/api";
 import { consumeSseWithRetry } from "../lib/sse";
 import { initialRunViewState, reduceRunState } from "../lib/run-state";
-import type { Approval, Followup, Message, Report, Run, RunEvent } from "../lib/types";
+import type { Approval, Followup, Message, Report, Run, RunCall, RunEvent } from "../lib/types";
 import { isTerminalRun } from "../lib/types";
 import { useSessionData } from "./use-session-data";
 import { useSessions } from "./use-sessions";
@@ -65,6 +65,7 @@ export function useWorkspaceController({ sessionId }: Props) {
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunEvents, setSelectedRunEvents] = useState<RunEvent[]>([]);
+  const [selectedRunCalls, setSelectedRunCalls] = useState<RunCall[]>([]);
   const [confirmAction, setConfirmAction] = useState<"delete" | "reset" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -114,6 +115,7 @@ export function useWorkspaceController({ sessionId }: Props) {
     setSelectedReport(null);
     setSelectedRunId(null);
     setSelectedRunEvents([]);
+    setSelectedRunCalls([]);
     setDetailTab("summary");
     setConfirmAction(null);
     setError("");
@@ -530,17 +532,25 @@ export function useWorkspaceController({ sessionId }: Props) {
     if (selectedRunId === run.id) {
       setSelectedRunId(null);
       setSelectedRunEvents([]);
+      setSelectedRunCalls([]);
       return;
     }
     setSelectedRunId(run.id);
     setSelectedRunEvents([]);
+    setSelectedRunCalls([]);
     try {
-      const result = await requestJson<{ events?: RunEvent[] }>(`/runs/${run.id}/events`);
-      setSelectedRunEvents(result.events || []);
+      const [detail, eventResult, callResult] = await Promise.all([
+        requestJson<Run>(`/runs/${run.id}`),
+        requestJson<{ events?: RunEvent[] }>(`/runs/${run.id}/events`),
+        requestJson<{ calls?: RunCall[] }>(`/runs/${run.id}/calls`),
+      ]);
+      data.setRuns((current) => current.map((item) => item.id === run.id ? { ...item, ...detail } : item));
+      setSelectedRunEvents(eventResult.events || []);
+      setSelectedRunCalls(callResult.calls || []);
     } catch (runError) {
       setError(safeError(runError));
     }
-  }, [selectedRunId]);
+  }, [data, selectedRunId]);
 
   return {
     ...sessions,
@@ -571,6 +581,7 @@ export function useWorkspaceController({ sessionId }: Props) {
     selectedReport,
     selectedRunId,
     selectedRunEvents,
+    selectedRunCalls,
     confirmAction,
     setConfirmAction,
     error,

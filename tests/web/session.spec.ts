@@ -470,7 +470,19 @@ test("renames, archives and deletes a session through confirmed lifecycle action
 });
 
 test("loads growth on its own page and exposes only safe persisted run metrics", async ({ page }) => {
-  const run = { id: RUN_ID, session_id: SESSION_ID, type: "diagnosis", status: "completed", input: {}, timing: { total_duration_ms: 4200 } };
+  const run = {
+    id: RUN_ID, session_id: SESSION_ID, type: "diagnosis", status: "completed", input: {},
+    timing: { queue_duration_ms: 100, approval_wait_ms: 0, active_duration_ms: 4100, total_duration_ms: 4200 },
+    metrics: {
+      calls_by_type: { llm: { calls: 2, succeeded: 2, failed: 0, retries: 1 }, embedding: { calls: 0, succeeded: 0, failed: 0, retries: 0 }, asr: { calls: 0, succeeded: 0, failed: 0, retries: 0 }, tool: { calls: 0, succeeded: 0, failed: 0, retries: 0 } },
+      call_count: 2, success_count: 2, failure_count: 0, retry_count: 1, total_tokens: 30,
+      unknown_token_calls: 1, audio_seconds: "0", estimated_costs: { USD: "0.00003" }, cost_unknown_reasons: ["price_unknown"],
+    },
+  };
+  const calls = [
+    { id: 1, logical_call_id: "diagnosis:known", parent_call_id: "", call_type: "llm", provider: "deepseek", model: "test", operation_name: "interview_diagnosis", status: "succeeded", started_at: "now", ended_at: "now", duration_ms: 3000, attempt_count: 2, retry_count: 1, error_category: "", input_tokens: 10, output_tokens: 20, total_tokens: 30, reasoning_tokens: 0, first_token_ms: 500, audio_seconds: null, price_currency: "USD", estimated_cost: "0.00003", usage_known: true, price_known: true, unknown_reason: "" },
+    { id: 2, logical_call_id: "diagnosis:unknown", parent_call_id: "", call_type: "llm", provider: "deepseek", model: "test", operation_name: "followup", status: "succeeded", started_at: "now", ended_at: "now", duration_ms: 500, attempt_count: 1, retry_count: 0, error_category: "", input_tokens: null, output_tokens: null, total_tokens: null, reasoning_tokens: null, first_token_ms: null, audio_seconds: null, price_currency: "", estimated_cost: "", usage_known: false, price_known: false, unknown_reason: "price_unknown" },
+  ];
   const events = [{ type: "diagnosis_model_completed", session_id: SESSION_ID, run_id: RUN_ID, sequence: 1, created_at: "now", data: { stream_mode: "stream", duration_ms: 3000, first_token_ms: 500, input_tokens: 10, output_tokens: 20, generated_chars: 240, finish_reason: "stop" } }];
   let eventsRequested = false;
   await page.route("**/api/**", async (route) => {
@@ -485,6 +497,8 @@ test("loads growth on its own page and exposes only safe persisted run metrics",
     if (path === `/api/sessions/${SESSION_ID}/summary`) return json(route, { summary_json: {} });
     if (path === `/api/sessions/${SESSION_ID}/followups`) return json(route, { followups: [] });
     if (path === `/api/sessions/${SESSION_ID}/reports`) return json(route, { reports: [] });
+    if (path === `/api/runs/${RUN_ID}`) return json(route, run);
+    if (path === `/api/runs/${RUN_ID}/calls`) return json(route, { calls });
     if (path === `/api/runs/${RUN_ID}/events`) { eventsRequested = true; return json(route, { events }); }
     return json(route, {});
   });
@@ -498,6 +512,11 @@ test("loads growth on its own page and exposes only safe persisted run metrics",
   await page.getByRole("button", { name: "查看指标" }).click();
   await expect.poll(() => eventsRequested).toBe(true);
   const runDetails = page.locator('aside[aria-label="会话详情"]');
+  await expect(runDetails.getByText("预估费用：")).toBeVisible();
+  await expect(runDetails.getByText("0.00003 USD，部分未知")).toBeVisible();
+  await expect(runDetails.getByText("Token 未知 1")).toBeVisible();
+  await runDetails.getByText("LLM · followup · succeeded").click();
+  await expect(runDetails.getByText("预估费用 未知")).toBeVisible();
   await expect(runDetails.getByText("技术指标")).toBeVisible();
   await expect(runDetails.getByText("输入 Token 10").last()).toBeHidden();
   await runDetails.getByText("技术指标").click();

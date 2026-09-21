@@ -27,6 +27,9 @@ async def search_knowledge(
     source: str | None = None,
     cancel_event: asyncio.Event | None = None,
     deadline: float | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    profile_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve bounded results without coupling to a Run or HTTP endpoint."""
     q = (question or query or "").strip()
@@ -53,6 +56,10 @@ async def search_knowledge(
             timeout=min(settings.embedding_timeout_seconds, require_remaining(deadline)),
             cancel_event=cancel_event,
             deadline=deadline,
+            run_id=run_id,
+            session_id=session_id,
+            profile_id=profile_id,
+            logical_call_id="embedding:retrieval",
         )
         query_vector = _validate_embedding_vector(query_vector)
         vector_results = await await_with_deadline(

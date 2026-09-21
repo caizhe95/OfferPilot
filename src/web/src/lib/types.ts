@@ -28,6 +28,50 @@ export type Timing = {
   total_duration_ms?: number;
 };
 
+export type RunCallType = "llm" | "embedding" | "asr" | "tool";
+
+export type RunCall = {
+  id: number;
+  logical_call_id: string;
+  parent_call_id: string;
+  call_type: RunCallType;
+  provider: string;
+  model: string;
+  operation_name: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  attempt_count: number;
+  retry_count: number;
+  error_category: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  reasoning_tokens: number | null;
+  first_token_ms: number | null;
+  audio_seconds: number | null;
+  price_currency: string;
+  audio_price_per_minute: string;
+  estimated_cost: string;
+  usage_known: boolean;
+  price_known: boolean;
+  unknown_reason: string;
+};
+
+export type RunMetrics = {
+  calls_by_type: Record<RunCallType, { calls: number; succeeded: number; failed: number; retries: number }>;
+  call_count: number;
+  success_count: number;
+  failure_count: number;
+  retry_count: number;
+  total_tokens: number;
+  unknown_token_calls: number;
+  audio_seconds: string;
+  estimated_costs: Record<string, string>;
+  cost_unknown_reasons: string[];
+};
+
 export type Approval = {
   id: string;
   run_id: string;
@@ -73,6 +117,7 @@ export type Run = {
   completed_at?: string | null;
   updated_at?: string;
   timing?: Timing | null;
+  metrics?: RunMetrics;
   pending_approval?: Approval | null;
   last_event_sequence?: number;
 };

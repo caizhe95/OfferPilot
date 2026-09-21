@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from offerpilot.core.config import settings
-from offerpilot.llm import provider, structured
+from offerpilot.llm import embeddings, provider, structured
 from offerpilot.llm.chat import MAX_CHAT_OUTPUT_TOKENS, MAX_TOOL_CALL_TOKENS, tool_chat_completion
 
 
@@ -173,6 +173,72 @@ async def test_provider_retries_three_times_with_four_second_attempt_cap(monkeyp
     assert len(timeouts) == 3
     assert all(0 < timeout <= provider.MAX_SINGLE_ATTEMPT_SECONDS for timeout in timeouts)
     assert delays == [0.5, 1.0]
+
+
+@pytest.mark.asyncio
+async def test_provider_attempt_callback_reports_successful_retry_and_exhaustion(monkeypatch):
+    events: list[dict] = []
+    attempts = 0
+
+    async def succeeds_after_retry(_timeout: float):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError()
+        return "ok"
+
+    async def no_wait(_delay: float, _cancel_event):
+        return None
+
+    monkeypatch.setattr(provider, "sleep_or_cancel", no_wait)
+    assert await provider.request_with_retry(succeeds_after_retry, timeout=10, on_attempt=events.append) == "ok"
+    assert [event["event"] for event in events] == ["started", "retry", "started", "completed"]
+
+    events.clear()
+
+    async def always_fails(_timeout: float):
+        raise TimeoutError()
+
+    with pytest.raises(provider.ProviderRequestError):
+        await provider.request_with_retry(always_fails, timeout=10, on_attempt=events.append)
+    assert [event["event"] for event in events] == ["started", "retry", "started", "retry", "started"]
+
+
+@pytest.mark.asyncio
+async def test_embedding_preserves_public_vector_result_and_records_usage(monkeypatch):
+    from offerpilot.database.connection import init_db
+    from offerpilot.runs.calls import list_calls
+    from offerpilot.runs.repository import create_run
+    from offerpilot.sessions.repository import create_session
+
+    profile_id = "00000000-0000-4000-8000-000000000001"
+    init_db()
+    session = create_session(profile_id)
+    run, _ = create_run(profile_id, session["id"], "coach", {}, "embedding-usage")
+    monkeypatch.setattr(settings, "embedding_api_key", "test-key")
+    monkeypatch.setattr(settings, "embedding_base_url", "https://example.test")
+
+    class Client:
+        embeddings = SimpleNamespace()
+
+        async def close(self):
+            return None
+
+    async def create(**_kwargs):
+        return SimpleNamespace(
+            data=[SimpleNamespace(embedding=[0.25, 0.75])],
+            usage=SimpleNamespace(prompt_tokens=12, total_tokens=12),
+        )
+
+    client = Client()
+    client.embeddings.create = create
+    monkeypatch.setattr(provider, "create_client", lambda **_kwargs: client)
+    vector = await embeddings.embed_text(
+        "query", run_id=run["id"], session_id=session["id"], profile_id=profile_id,
+    )
+    assert vector == [0.25, 0.75]
+    calls = list_calls(run["id"], profile_id)
+    assert calls is not None and calls[0]["input_tokens"] == 12 and calls[0]["total_tokens"] == 12
 
 
 @pytest.mark.asyncio

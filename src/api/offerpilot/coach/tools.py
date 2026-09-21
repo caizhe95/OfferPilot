@@ -84,6 +84,8 @@ def create_coach_registry(
         SearchKnowledgeArgs,
         lambda p: _search_knowledge_for_run(
             run_id,
+            session_id,
+            profile_id,
             question=p["question"],
             answer=p["answer"],
             limit=p["limit"],
@@ -97,7 +99,7 @@ def create_coach_registry(
         "recommend_next_question",
         "Recommend a question from the internal knowledge base; never invent one.",
         RecommendArgs,
-        lambda p: _recommend(p["focus"], run_id, deadline=deadline, cancel_event=cancel_event),
+        lambda p: _recommend(p["focus"], run_id, session_id, profile_id, deadline=deadline, cancel_event=cancel_event),
         ),
         _definition(
         "save_memory",
@@ -118,12 +120,16 @@ def create_coach_registry(
 async def _recommend(
     focus: str,
     run_id: str,
+    session_id: str,
+    profile_id: str,
     *,
     deadline: float | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> dict[str, Any]:
     items = await _search_knowledge_for_run(
         run_id,
+        session_id,
+        profile_id,
         question=focus or "技术面试练习",
         answer="",
         limit=1,
@@ -136,12 +142,22 @@ async def _recommend(
     return {"question": item.get("question", item.get("title", "")), "exam_points": item.get("exam_points", [])[:5], "reason": "根据内部题库检索结果推荐", "source": item.get("source", item.get("title", ""))}
 
 
-async def _search_knowledge_for_run(run_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+async def _search_knowledge_for_run(
+    run_id: str,
+    session_id: str,
+    profile_id: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
     from time import perf_counter
 
     started = perf_counter()
     try:
-        results = await search_knowledge(**kwargs)
+        results = await search_knowledge(
+            **kwargs,
+            run_id=run_id,
+            session_id=session_id,
+            profile_id=profile_id,
+        )
     except Exception as exc:
         append_event(run_id, "knowledge_error", {"error": exc.__class__.__name__.lower()})
         notify(run_id)

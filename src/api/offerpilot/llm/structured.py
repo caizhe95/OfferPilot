@@ -14,6 +14,9 @@ from offerpilot.core.config import settings
 from offerpilot.core.errors import AppError
 from offerpilot.core.logging import log_event
 from offerpilot.llm import provider
+from offerpilot.runs.calls import begin_call, finish_call, record_attempt
+from offerpilot.runs.pricing import price_fields
+from offerpilot.database.values import now
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +134,10 @@ async def structured_json_completion(
     deadline: float | None = None,
     on_progress: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     on_fallback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    profile_id: str | None = None,
+    logical_call_id: str | None = None,
 ) -> StructuredLLMResult:
     if provider.is_placeholder_key(settings.openai_api_key):
         raise provider.LLMUnavailableError()
@@ -147,6 +154,21 @@ async def structured_json_completion(
             {"role": "user", "content": json.dumps(user_payload, ensure_ascii=True)},
         ],
     }
+    call_started_at = now() if run_id and session_id and profile_id and logical_call_id else ""
+    if call_started_at:
+        begin_call(
+            run_id=run_id or "", session_id=session_id or "", profile_id=profile_id or "",
+            logical_call_id=logical_call_id or task_name, call_type="llm", provider="deepseek",
+            model=selected_model, operation_name=task_name,
+        )
+
+    attempt_count = 0
+
+    async def on_attempt(event: dict[str, Any]) -> None:
+        nonlocal attempt_count
+        if run_id and profile_id and logical_call_id and event.get("event") == "started":
+            attempt_count += 1
+            record_attempt(run_id, profile_id, logical_call_id, attempt_count, max(0, attempt_count - 1))
 
     async def non_stream(attempt_timeout: float, stream_mode: str) -> _ProviderResponse:
         client = provider.create_client(timeout=attempt_timeout)
@@ -213,6 +235,7 @@ async def structured_json_completion(
                 max_attempt_seconds=MAX_STRUCTURED_ATTEMPT_SECONDS,
                 cancel_event=cancel_event,
                 deadline=request_deadline,
+                on_attempt=on_attempt,
             )
         except provider.ProviderRequestError as exc:
             if exc.category != "stream_structured_unsupported":
@@ -233,10 +256,19 @@ async def structured_json_completion(
                 max_attempt_seconds=MAX_STRUCTURED_ATTEMPT_SECONDS,
                 cancel_event=cancel_event,
                 deadline=request_deadline,
+                on_attempt=on_attempt,
             )
-    except (AppError, asyncio.CancelledError):
+    except asyncio.CancelledError:
+        if call_started_at:
+            finish_call(run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name, status="cancelled", started_at=call_started_at, error_category="cancelled")
+        raise
+    except AppError:
+        if call_started_at:
+            finish_call(run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name, status="failed", started_at=call_started_at, error_category="provider")
         raise
     except Exception as exc:
+        if call_started_at:
+            finish_call(run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name, status="failed", started_at=call_started_at, error_category="provider")
         raise provider.LLMUnavailableError(f"{task_name}: LLM request failed") from exc
 
     completed = StructuredLLMResult(
@@ -250,6 +282,14 @@ async def structured_json_completion(
     metrics = structured_result_metrics(completed)
     log_event(logger, logging.INFO, "structured_model_completed", task=task_name, provider="deepseek", model=selected_model, **metrics)
     if completed.finish_reason == "length":
+        if call_started_at:
+            finish_call(
+                run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name,
+                status="failed", started_at=call_started_at, input_tokens=completed.input_tokens,
+                output_tokens=completed.output_tokens, total_tokens=completed.total_tokens,
+                reasoning_tokens=completed.reasoning_tokens, first_token_ms=completed.first_token_ms,
+                error_category="output_truncated", **price_fields("deepseek", selected_model),
+            )
         raise LLMOutputTruncatedError(metrics=metrics)
     validation_started = perf_counter()
     try:
@@ -260,8 +300,25 @@ async def structured_json_completion(
             raise ValueError("structured response failed validation")
         completed.data = data
         completed.validation_duration_ms = max(0, int(round((perf_counter() - validation_started) * 1000)))
+        if call_started_at:
+            finish_call(
+                run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name,
+                status="succeeded", started_at=call_started_at, input_tokens=completed.input_tokens,
+                output_tokens=completed.output_tokens, total_tokens=completed.total_tokens,
+                reasoning_tokens=completed.reasoning_tokens, first_token_ms=completed.first_token_ms,
+                **price_fields("deepseek", selected_model),
+            )
         return completed
     except Exception as exc:
+        if call_started_at:
+            finish_call(
+                run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id or task_name,
+                status="failed", started_at=call_started_at, input_tokens=completed.input_tokens,
+                output_tokens=completed.output_tokens, total_tokens=completed.total_tokens,
+                reasoning_tokens=completed.reasoning_tokens, first_token_ms=completed.first_token_ms,
+                error_category="invalid_response",
+                **price_fields("deepseek", selected_model),
+            )
         raise LLMInvalidResponseError(
             f"{task_name}: invalid structured response",
             metrics=metrics,

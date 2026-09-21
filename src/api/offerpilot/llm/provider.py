@@ -183,6 +183,7 @@ async def request_with_retry(
     max_attempt_seconds: float = MAX_SINGLE_ATTEMPT_SECONDS,
     cancel_event: asyncio.Event | None = None,
     deadline: float | None = None,
+    on_attempt: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> Any:
     started = perf_counter()
     request_deadline = min(
@@ -196,6 +197,7 @@ async def request_with_retry(
         if remaining <= 0:
             raise ProviderRequestError("timeout", "Provider request exceeded the active run budget")
         try:
+            await invoke_callback(on_attempt, {"event": "started", "attempt": attempt + 1, "retry_count": attempt})
             attempt_timeout = min(max(0.001, max_attempt_seconds), remaining)
             result = await await_attempt(
                 operation(attempt_timeout),
@@ -203,6 +205,7 @@ async def request_with_retry(
                 cancel_event=cancel_event,
             )
             log_event(logger, logging.INFO, "provider_call_completed", task=task, provider=provider, model=model, attempt=attempt + 1, duration_ms=round((perf_counter() - started) * 1000, 1), result_code="ok")
+            await invoke_callback(on_attempt, {"event": "completed", "attempt": attempt + 1, "retry_count": attempt})
             return result
         except asyncio.CancelledError:
             raise
@@ -211,6 +214,7 @@ async def request_with_retry(
             if not retryable or attempt + 1 >= MAX_ATTEMPTS:
                 log_event(logger, logging.ERROR, "provider_call_failed", task=task, provider=provider, model=model, attempt=attempt + 1, duration_ms=round((perf_counter() - started) * 1000, 1), error_code=category)
                 raise ProviderRequestError(category) from None
+            await invoke_callback(on_attempt, {"event": "retry", "attempt": attempt + 1, "retry_count": attempt + 1, "error_category": category})
             delay = retry_after if retry_after is not None else RETRY_DELAYS[attempt]
             if delay >= request_deadline - asyncio.get_running_loop().time():
                 log_event(logger, logging.ERROR, "provider_call_failed", task=task, provider=provider, model=model, attempt=attempt + 1, duration_ms=round((perf_counter() - started) * 1000, 1), error_code=category)

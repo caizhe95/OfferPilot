@@ -196,6 +196,9 @@ async def diagnose_interview(
     deadline: float | None = None,
     on_progress=None,
     on_fallback=None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    profile_id: str | None = None,
 ) -> dict:
     """Make exactly one LLM call for all semantic diagnosis decisions."""
     payload = {
@@ -214,6 +217,10 @@ async def diagnose_interview(
         deadline=deadline,
         on_progress=on_progress,
         on_fallback=on_fallback,
+        run_id=run_id,
+        session_id=session_id,
+        profile_id=profile_id,
+        logical_call_id="diagnosis:structured",
     )
     if inspect.isawaitable(result):
         result = await result

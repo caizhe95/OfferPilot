@@ -23,6 +23,7 @@ def test_schema_has_run_tables():
         conn.close()
     expected = {
         "profiles", "sessions", "runs", "run_events", "approvals", "profile_memories",
+        "run_calls",
         "session_summaries", "session_followups", "profile_growth_summaries",
         "diagnosis_reports", "diagnosis_point_results", "knowledge_exam_points", "operation_logs",
     }

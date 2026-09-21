@@ -47,6 +47,7 @@ function DesktopWorkspace({ sessionId }: Props) {
     selectedReport={workspace.selectedReport}
     selectedRunId={workspace.selectedRunId}
     selectedRunEvents={workspace.selectedRunEvents}
+    selectedRunCalls={workspace.selectedRunCalls}
     onSelectReport={(report) => { void workspace.selectReport(report); }}
     onSelectRun={(run) => { void workspace.selectRun(run); }}
     onFollowup={workspace.selectFollowup}

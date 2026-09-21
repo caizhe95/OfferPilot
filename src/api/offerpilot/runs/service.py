@@ -289,6 +289,10 @@ class RunService:
             cancel_event=cancel_event,
             timeout=30.0,
             deadline=asr_deadline,
+            run_id=run_id,
+            session_id=run["session_id"],
+            profile_id=run["profile_id"],
+            logical_call_id=f"asr:{upload_id}",
         )
         if cancel_event.is_set():
             raise asyncio.CancelledError()

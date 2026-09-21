@@ -1,6 +1,6 @@
 # OfferPilot v5 规划
 
-状态：需求已锁定，尚未实施。完成四个阶段后冻结秋招作品集版本。
+状态：Stage 1、Stage 2 已完成；Stage 3、Stage 4 待实施。完成四个阶段后冻结秋招作品集版本。
 
 ## 目标
 
@@ -27,6 +27,8 @@
 完成判据：后端测试、`mypy`、`compileall`、前端构建、浏览器 E2E、隔离矩阵和 `git diff --check` 全部通过。
 
 ## Stage 2：Run 成本与性能观测
+
+实施状态：已完成。Provider 价格审查见 [provider-pricing.md](provider-pricing.md)。
 
 每次 LLM、Embedding、ASR 和 Tool 执行保存一条脱敏调用明细，并按 Run 聚合：
 

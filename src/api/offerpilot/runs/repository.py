@@ -9,6 +9,7 @@ from typing import Any
 from offerpilot.database.connection import get_db
 from offerpilot.database.values import dumps, loads, now
 from offerpilot.profiles.repository import ensure_profile
+from offerpilot.runs.calls import aggregate_calls
 
 RUN_TYPES = {"coach", "diagnosis", "audio_transcription", "report_export"}
 RUN_TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
@@ -123,6 +124,7 @@ def _run_row(row: Any, conn: Any) -> dict[str, Any]:
         "timing": timing,
         "pending_approval": public_approval,
         "last_event_sequence": last_sequence,
+        "metrics": aggregate_calls(row["id"], row["profile_id"]),
     }
 
 

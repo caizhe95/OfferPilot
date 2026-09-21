@@ -15,6 +15,7 @@ from offerpilot.runs.contracts import RunRequest, validate_run_input
 from offerpilot.runs.events import stream
 from offerpilot.approvals.repository import get_approval
 from offerpilot.runs.repository import create_run, events_after, get_run, list_runs, request_cancel, transition_run
+from offerpilot.runs.calls import list_calls
 from offerpilot.runs.service import run_service
 from offerpilot.sessions.followups import link_followup
 from offerpilot.sessions.guards import require_active_session
@@ -153,6 +154,12 @@ async def export_report_endpoint(
 @router.get("/runs/{run_id}")
 async def get_run_endpoint(run_id: str, profile_id: str = Depends(require_profile_id)):
     return _owned_run(run_id, profile_id)
+
+
+@router.get("/runs/{run_id}/calls")
+async def run_calls_endpoint(run_id: str, profile_id: str = Depends(require_profile_id)):
+    _owned_run(run_id, profile_id)
+    return {"calls": list_calls(run_id, profile_id) or []}
 
 
 @router.get("/runs/{run_id}/events")

@@ -62,7 +62,7 @@ async def run_diagnosis(*, run_id: str, session_id: str, profile_id: str, questi
             raise_if_cancelled(cancel_event)
             _emit(run_id, "diagnosis_started", {})
             started = perf_counter()
-            knowledge = await search_knowledge(question=question, answer=answer, limit=5, cancel_event=cancel_event, deadline=deadline)
+            knowledge = await search_knowledge(question=question, answer=answer, limit=5, cancel_event=cancel_event, deadline=deadline, run_id=run_id, session_id=session_id, profile_id=profile_id)
             _emit(run_id, "knowledge_merged", {"fts_count": sum(bool(item.get("fts_rank")) for item in knowledge), "vector_count": sum(bool(item.get("vector_rank")) for item in knowledge), "count": len(knowledge), "embedding_unavailable": any(item.get("embedding_unavailable") for item in knowledge), "duration_ms": max(0, int((perf_counter() - started) * 1000))})
             points = select_scorable_points(knowledge)
             if not points: raise AppError("No stable exam points were recalled", code="no_reference_exam_points", status_code=503)
@@ -71,7 +71,7 @@ async def run_diagnosis(*, run_id: str, session_id: str, profile_id: str, questi
             _emit(run_id, "context_built", {"duration_ms": max(0, int((perf_counter() - started) * 1000)), "context_chars": len(context)})
             _emit(run_id, "diagnosis_model_started", {"exam_point_count": len(points)})
             try:
-                diagnosis = await diagnose_interview(question=question, answer=answer, scorable_points=points, context_instruction=context, timeout=require_remaining(deadline), cancel_event=cancel_event, deadline=deadline, on_progress=lambda data: _emit(run_id, "diagnosis_model_progress", data), on_fallback=lambda data: _emit(run_id, "diagnosis_model_fallback", data))
+                diagnosis = await diagnose_interview(question=question, answer=answer, scorable_points=points, context_instruction=context, timeout=require_remaining(deadline), cancel_event=cancel_event, deadline=deadline, on_progress=lambda data: _emit(run_id, "diagnosis_model_progress", data), on_fallback=lambda data: _emit(run_id, "diagnosis_model_fallback", data), run_id=run_id, session_id=session_id, profile_id=profile_id)
             except (LLMInvalidResponseError, LLMOutputTruncatedError) as exc:
                 metrics = dict(getattr(exc, "metrics", {}) or {})
                 if metrics: _emit(run_id, "diagnosis_model_completed", metrics)

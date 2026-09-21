@@ -27,6 +27,8 @@ from offerpilot.approvals.service import claim_approval, finish_approval
 from offerpilot.runs.repository import get_run, save_run_state
 from offerpilot.runs.operation_logs import write_permission_log
 from offerpilot.sessions.repository import add_message, get_messages
+from offerpilot.database.values import now
+from offerpilot.runs.calls import begin_call, finish_call, record_attempt
 
 MAX_ITERATIONS = 4
 MAX_TOOL_CALLS = 8
@@ -169,7 +171,12 @@ class CoachLoop:
                     return self.result
                 try:
                     registry = self._registry()
-                    result = await self._execute_tool(registry, pending["name"], pending["params"])
+                    result = await self._execute_tool(
+                        registry,
+                        pending["name"],
+                        pending["params"],
+                        logical_call_id=f"tool:approved:{pending.get('id') or pending['name']}",
+                    )
                     finish_approval(approval_id, True)
                     write_permission_log(
                         self.session_id,
@@ -234,6 +241,10 @@ class CoachLoop:
                     timeout=remaining,
                     cancel_event=self.cancel_event,
                     deadline=self._deadline,
+                    run_id=self.run_id,
+                    session_id=self.session_id,
+                    profile_id=self.profile_id,
+                    logical_call_id=f"coach:chat:{iteration + 1}",
                 )
                 reply = await _resolve_tool_reply(provider_reply)
                 iteration += 1
@@ -331,24 +342,54 @@ class CoachLoop:
                 "pending_call": {"id": call["id"], "name": name, "params": params},
                 "public_params": public_params,
             }, True
-        result = await self._execute_tool(registry, name, params)
+        result = await self._execute_tool(
+            registry,
+            name,
+            params,
+            logical_call_id=f"tool:{iteration}:{call['id'] or name}",
+        )
         await self._emit("tool_result", tool_name=name, result=result)
         return result, False
 
-    async def _execute_tool(self, registry: ToolRegistry, name: str, params: dict[str, Any]) -> Any:
+    async def _execute_tool(
+        self,
+        registry: ToolRegistry,
+        name: str,
+        params: dict[str, Any],
+        *,
+        logical_call_id: str,
+    ) -> Any:
         self._raise_if_cancelled()
         tool = registry.get(name)
         if tool is None:
             raise ValueError("unknown_tool")
-        result = await await_with_deadline(
-            asyncio.to_thread(tool.execute, params),
-            deadline=self._deadline,
-            cancel_event=self.cancel_event,
+        started_at = now()
+        begin_call(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            profile_id=self.profile_id,
+            logical_call_id=logical_call_id,
+            call_type="tool",
+            operation_name=name,
         )
-        if inspect.isawaitable(result):
-            return await await_with_deadline(
-                result, deadline=self._deadline, cancel_event=self.cancel_event
+        record_attempt(self.run_id, self.profile_id, logical_call_id, 1, 0)
+        try:
+            result = await await_with_deadline(
+                asyncio.to_thread(tool.execute, params),
+                deadline=self._deadline,
+                cancel_event=self.cancel_event,
             )
+            if inspect.isawaitable(result):
+                result = await await_with_deadline(
+                    result, deadline=self._deadline, cancel_event=self.cancel_event
+                )
+        except asyncio.CancelledError:
+            finish_call(run_id=self.run_id, profile_id=self.profile_id, logical_call_id=logical_call_id, status="cancelled", started_at=started_at, error_category="cancelled")
+            raise
+        except Exception as exc:
+            finish_call(run_id=self.run_id, profile_id=self.profile_id, logical_call_id=logical_call_id, status="failed", started_at=started_at, error_category=exc.__class__.__name__.lower())
+            raise
+        finish_call(run_id=self.run_id, profile_id=self.profile_id, logical_call_id=logical_call_id, status="failed" if tool_result_has_error(result) else "succeeded", started_at=started_at, error_category="tool_error" if tool_result_has_error(result) else "")
         return result
 
     def _registry(self) -> ToolRegistry:

@@ -14,6 +14,8 @@ from offerpilot.core.config import settings
 from offerpilot.core.deadlines import await_with_deadline, require_remaining
 from offerpilot.core.logging import log_event
 from offerpilot.audio.storage import resolve_uploaded_audio
+from offerpilot.database.values import now
+from offerpilot.runs.calls import begin_call, finish_call, record_attempt
 
 logger = logging.getLogger(__name__)
 ASR_TIMEOUT_SECONDS = 30.0
@@ -56,18 +58,39 @@ async def transcribe_audio(
     cancel_event: asyncio.Event | None = None,
     timeout: float = ASR_TIMEOUT_SECONDS,
     deadline: float | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    profile_id: str | None = None,
+    logical_call_id: str = "asr:audio",
 ) -> dict[str, Any]:
     """Transcribe a managed upload and return only safe result metadata."""
     started = perf_counter()
+    started_at = now() if run_id and session_id and profile_id else ""
+    if started_at:
+        begin_call(run_id=run_id or "", session_id=session_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id, call_type="asr", provider="mimo", model=settings.mimo_asr_model, operation_name="transcribe_audio")
+
+    def complete(result: dict[str, Any], status: str, error_category: str = "") -> dict[str, Any]:
+        if started_at:
+            duration = result.get("duration_seconds")
+            finish_call(
+                run_id=run_id or "", profile_id=profile_id or "", logical_call_id=logical_call_id,
+                status=status, started_at=started_at,
+                audio_seconds=float(duration) if isinstance(duration, (int, float)) else None,
+                error_category=error_category,
+            )
+        return result
+
     try:
         if not settings.mimo_api_key.strip():
             result = {"transcript": "", "error": "asr_configuration", "provider": "mimo"}
             log_event(logger, logging.ERROR, "asr_call_failed", provider="mimo", error_code=result["error"], duration_ms=0)
-            return result
+            return complete(result, "failed", result["error"])
         import httpx
 
         if cancel_event and cancel_event.is_set():
-            return {"transcript": "", "error": "asr_cancelled", "provider": "mimo"}
+            return complete({"transcript": "", "error": "asr_cancelled", "provider": "mimo"}, "cancelled", "asr_cancelled")
+        if started_at:
+            record_attempt(run_id or "", profile_id or "", logical_call_id, 1, 0)
         timeout = max(0.001, min(float(timeout), ASR_TIMEOUT_SECONDS, require_remaining(deadline)))
         headers = {"api-key": settings.mimo_api_key, "Authorization": f"Bearer {settings.mimo_api_key}"}
         async with asyncio.timeout(timeout):
@@ -82,18 +105,18 @@ async def transcribe_audio(
         if not transcript:
             result = {"transcript": "", "error": "asr_invalid_response", "provider": "mimo"}
             log_event(logger, logging.ERROR, "asr_call_failed", provider="mimo", error_code=result["error"], duration_ms=round((perf_counter() - started) * 1000, 1))
-            return result
+            return complete(result, "failed", result["error"])
         result = {"transcript": transcript, "provider": "mimo", "duration_seconds": data.get("duration", 0), "language": data.get("language", "auto")}
         log_event(logger, logging.INFO, "asr_call_completed", provider="mimo", duration_ms=round((perf_counter() - started) * 1000, 1), result_code="ok")
-        return result
+        return complete(result, "succeeded")
     except asyncio.CancelledError:
         result = {"transcript": "", "error": "asr_cancelled", "provider": "mimo"}
         log_event(logger, logging.WARNING, "asr_call_failed", provider="mimo", error_code=result["error"], duration_ms=round((perf_counter() - started) * 1000, 1))
-        return result
+        return complete(result, "cancelled", result["error"])
     except Exception as exc:
         result = {"transcript": "", "error": _asr_error_category(exc), "provider": "mimo"}
         log_event(logger, logging.ERROR, "asr_call_failed", provider="mimo", error_code=result["error"], duration_ms=round((perf_counter() - started) * 1000, 1))
-        return result
+        return complete(result, "failed", result["error"])
 
 
 def _extract_mimo_transcript(data: dict) -> str:

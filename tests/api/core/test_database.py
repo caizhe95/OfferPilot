@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-import uuid
 from pathlib import Path
 
 import pytest
@@ -42,6 +41,7 @@ def test_empty_database_is_initialized_with_current_schema(monkeypatch, database
             "sessions",
             "runs",
             "run_events",
+            "run_calls",
             "messages",
             "approvals",
             "diagnosis_reports",
@@ -114,6 +114,11 @@ def test_composite_ownership_constraints_reject_cross_profile_resources(monkeypa
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
                 "INSERT INTO run_events(run_id, session_id, profile_id, sequence, event_type, created_at) VALUES(?, ?, ?, 99, 'forged', ?)",
+                (run_a["id"], session_a["id"], profile_b, now),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO run_calls(run_id, session_id, profile_id, logical_call_id, call_type, started_at) VALUES(?, ?, ?, 'forged', 'llm', ?)",
                 (run_a["id"], session_a["id"], profile_b, now),
             )
         with pytest.raises(sqlite3.IntegrityError):

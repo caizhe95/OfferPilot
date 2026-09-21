@@ -269,6 +269,47 @@ CREATE TABLE IF NOT EXISTS operation_logs (
     FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS run_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    logical_call_id TEXT NOT NULL,
+    parent_call_id TEXT NOT NULL DEFAULT '',
+    call_type TEXT NOT NULL CHECK(call_type IN ('llm', 'embedding', 'asr', 'tool')),
+    provider TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    operation_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'succeeded', 'failed', 'cancelled')),
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL DEFAULT '',
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    error_category TEXT NOT NULL DEFAULT '',
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    first_token_ms INTEGER,
+    audio_seconds REAL,
+    price_version TEXT NOT NULL DEFAULT '',
+    price_source_url TEXT NOT NULL DEFAULT '',
+    price_currency TEXT NOT NULL DEFAULT '',
+    price_effective_at TEXT NOT NULL DEFAULT '',
+    input_price_per_million TEXT NOT NULL DEFAULT '',
+    output_price_per_million TEXT NOT NULL DEFAULT '',
+    audio_price_per_minute TEXT NOT NULL DEFAULT '',
+    estimated_cost TEXT NOT NULL DEFAULT '',
+    usage_known INTEGER NOT NULL DEFAULT 0 CHECK(usage_known IN (0, 1)),
+    price_known INTEGER NOT NULL DEFAULT 0 CHECK(price_known IN (0, 1)),
+    unknown_reason TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY (run_id, session_id, profile_id) REFERENCES runs(id, session_id, profile_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, profile_id) REFERENCES sessions(id, profile_id) ON DELETE CASCADE,
+    UNIQUE(run_id, profile_id, logical_call_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_profile ON sessions(profile_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status, updated_at);
@@ -283,6 +324,7 @@ CREATE INDEX IF NOT EXISTS idx_reports_session ON diagnosis_reports(session_id, 
 CREATE INDEX IF NOT EXISTS idx_point_results_report ON diagnosis_point_results(report_id, exam_point_id);
 CREATE INDEX IF NOT EXISTS idx_audio_owner ON audio_uploads(session_id, profile_id, status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_operation_logs_run ON operation_logs(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_run_calls_run ON run_calls(run_id, profile_id, started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_run_per_session
     ON runs(session_id)
     WHERE status IN ('pending', 'running', 'waiting_approval');

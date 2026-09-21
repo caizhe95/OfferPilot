@@ -23,6 +23,7 @@ OPENAPI_PATHS = {
     "/api/profile/growth",
     "/api/profile/reset",
     "/api/runs/{run_id}",
+    "/api/runs/{run_id}/calls",
     "/api/runs/{run_id}/cancel",
     "/api/runs/{run_id}/events",
     "/api/runs/{run_id}/stream",
